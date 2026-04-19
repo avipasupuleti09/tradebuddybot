@@ -469,7 +469,7 @@ async function generateScan(limit = null, persist = true, requestOptions = {}) {
 
   const datasets = buildDatasets(rows, liveRows, errors)
   if (persist && config.persistWorkbook) {
-    writeWorkbook(Object.fromEntries(Object.entries(datasets).map(([sheet, value]) => [sheet, convertSheetRows(value)])))
+    await writeWorkbook(Object.fromEntries(Object.entries(datasets).map(([sheet, value]) => [sheet, convertSheetRows(value)])))
   }
   return datasets
 }

@@ -1,7 +1,6 @@
-import fs from 'node:fs'
-import XLSX from 'xlsx'
 import config from './config.js'
 import { toFyersTicker } from './utils.js'
+import { loadSheetRows } from './xlsxStore.js'
 
 async function fetchJson(url, label) {
   const response = await fetch(url, {
@@ -80,16 +79,12 @@ export function normalizeRequestedOverrides(payload, valueKeys) {
   return normalizeOverrideMap(payload, valueKeys)
 }
 
-function readSheet(sheetName) {
-  if (!fs.existsSync(config.inputExcel)) return []
-  const workbook = XLSX.readFile(config.inputExcel)
-  const worksheet = workbook.Sheets[sheetName]
-  if (!worksheet) return []
-  return XLSX.utils.sheet_to_json(worksheet, { defval: null })
+async function readSheet(sheetName) {
+  return loadSheetRows(config.inputExcel, sheetName)
 }
 
-function loadWatchlistFromFile(limit = null) {
-  const rows = readSheet(config.watchlistSheet)
+async function loadWatchlistFromFile(limit = null) {
+  const rows = await readSheet(config.watchlistSheet)
   const tickers = rows
     .map((row) => toFyersTicker(row[config.symbolCol]))
     .filter(Boolean)
@@ -101,8 +96,8 @@ function loadWatchlistFromEnv(limit = null) {
   return normalizeRequestedWatchlist(config.watchlistSymbols, limit)
 }
 
-function loadSectorOverridesFromFile() {
-  const rows = readSheet(config.sectorSheet)
+async function loadSectorOverridesFromFile() {
+  const rows = await readSheet(config.sectorSheet)
   return Object.fromEntries(
     rows
       .map((row) => [String(row[config.sectorSymbolCol] || '').trim().toUpperCase(), row[config.sectorCol]])
@@ -110,8 +105,8 @@ function loadSectorOverridesFromFile() {
   )
 }
 
-function loadDeliveryOverridesFromFile() {
-  const rows = readSheet(config.deliverySheet)
+async function loadDeliveryOverridesFromFile() {
+  const rows = await readSheet(config.deliverySheet)
   return Object.fromEntries(
     rows
       .map((row) => [String(row[config.deliverySymbolCol] || '').trim().toUpperCase(), row[config.deliveryPctCol]])
