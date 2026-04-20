@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from flask import Flask, jsonify, redirect, request
 from flask_cors import CORS
 from flask_sock import Sock
+from dotenv import dotenv_values
 
 from .api import FyersApiService
 from .auth import FyersAuthService
@@ -21,6 +22,19 @@ from .symbols import SymbolMaster
 from .token_store import TokenStore
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def read_frontend_url() -> str:
+    if PROJECT_ENV_FILE.exists():
+        file_value = dotenv_values(PROJECT_ENV_FILE).get("FRONTEND_URL", "")
+        if file_value:
+            return str(file_value).strip().rstrip("/")
+
+    return os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -28,7 +42,7 @@ def create_app() -> Flask:
     sock = Sock(app)
 
     settings = Settings.from_env()
-    frontend_url = os.getenv("FRONTEND_URL", "").rstrip("/")
+    frontend_url = read_frontend_url()
     symbol_master = SymbolMaster()
     watchlist_file = Path(os.getenv("WATCHLIST_FILE", ".data/watchlists.json")).resolve()
     analytics_cache_file = Path(os.getenv("NSE_ANALYTICS_CACHE_FILE", ".cache/nse_analytics_cache.json")).resolve()
@@ -194,13 +208,28 @@ def create_app() -> Flask:
     def session_status() -> tuple[dict, int]:
         try:
             api = load_api()
-            profile = api.profile()
+        except Exception as exc:
+            return {"authenticated": False, "message": str(exc)}, 200
+
+        profile = api.profile()
+        if str(profile.get("s", "")).lower() == "ok":
             return {
-                "authenticated": str(profile.get("s", "")).lower() == "ok",
+                "authenticated": True,
                 "profile": profile.get("data", {}),
             }, 200
-        except Exception:
-            return {"authenticated": False}, 200
+
+        funds = api.funds()
+        if str(funds.get("s", "")).lower() == "ok":
+            return {
+                "authenticated": True,
+                "profile": {},
+                "warning": profile.get("message") or "Profile details are temporarily unavailable.",
+            }, 200
+
+        return {
+            "authenticated": False,
+            "message": profile.get("message") or "Unable to validate FYERS session.",
+        }, 200
 
     @app.post("/api/logout")
     def logout() -> tuple[dict, int]:

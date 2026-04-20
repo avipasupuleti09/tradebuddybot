@@ -32,7 +32,7 @@ FYERS_ORDER_STATIC_IP=YOUR_WHITELISTED_STATIC_IP
 FYERS_ENFORCE_STATIC_IP_CHECK=true
 PUBLIC_IP_CHECK_URL=https://api.ipify.org
 FYERS_PAPER_TRADE_MODE=true
-FRONTEND_URL=http://localhost:5173
+FRONTEND_URL=http://localhost:5100
 ```
 
 Important: the same redirect URI must be configured in your FYERS app settings.
@@ -86,7 +86,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`.
+Open `http://localhost:5100`.
 
 ## 4) Run Both With One Command
 
@@ -97,7 +97,7 @@ npm run dev
 
 This starts:
 - backend API on `http://localhost:5000`
-- frontend UI on `http://localhost:5173`
+- frontend UI on `http://localhost:5100`
 
 ## 5) Login Flow from UI
 

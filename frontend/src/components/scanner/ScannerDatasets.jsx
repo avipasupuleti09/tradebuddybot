@@ -1,6 +1,6 @@
 import { ResponsiveContainer, LineChart, Line } from "recharts";
-import { useScannerContext } from "./ScannerContext";
-import { IcArrowUp, IcArrowDown } from "./common/Icons";
+import { useScannerContext } from "../../context/scanner/ScannerContext";
+import { IcArrowUp, IcArrowDown } from "../common/Icons";
 import {
   TAB_CONFIG,
   ScannerDataTable,

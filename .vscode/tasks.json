@@ -4,9 +4,15 @@
     {
       "label": "Run Backend",
       "type": "shell",
-      "command": "python",
-      "args": ["server.py"],
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": ["${workspaceFolder}\\server.py"],
       "isBackground": true,
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "FRONTEND_URL": "http://localhost:5100"
+        }
+      },
       "problemMatcher": {
         "pattern": {
           "regexp": "^.*$",
@@ -19,8 +25,7 @@
           "beginsPattern": "^.*Running on.*",
           "endsPattern": "^.*Running on.*"
         }
-      },
-      "cwd": "${workspaceFolder}"
+      }
     },
     {
       "label": "Run Frontend",
@@ -28,6 +33,9 @@
       "command": "npm",
       "args": ["--prefix", "frontend", "run", "dev", "--", "--host", "0.0.0.0"],
       "isBackground": true,
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "problemMatcher": {
         "pattern": {
           "regexp": "^.*$",
@@ -40,8 +48,7 @@
           "beginsPattern": "^.*VITE.*",
           "endsPattern": "^.*ready in.*"
         }
-      },
-      "cwd": "${workspaceFolder}"
+      }
     },
     {
       "label": "Run All",

@@ -1,14 +1,15 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { NavLink, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
-import { API_BASE, fetchDashboard, fetchQuotes, fetchSession, fetchAllNseSymbols, fetchNseSymbolAnalytics, login, logout, placeOrder, runStrategy } from "./api";
+import { API_BASE, fetchDashboard, fetchPnlHistory, fetchQuotes, fetchSession, fetchAllNseSymbols, fetchNseSymbolAnalytics, login, logout, placeOrder, runStrategy } from "./api";
 
-const MarketsPage = lazy(() => import("./MarketsPage"));
-const ScannerLayout = lazy(() => import("./ScannerLayout"));
-const ScannerCommandDeck = lazy(() => import("./ScannerCommandDeck"));
-const ScannerExecution = lazy(() => import("./ScannerExecution"));
-const ScannerVisuals = lazy(() => import("./ScannerVisuals"));
-const ScannerDatasets = lazy(() => import("./ScannerDatasets"));
+const MarketsPage = lazy(() => import("./pages/MarketsPage"));
+const ScannerLayout = lazy(() => import("./pages/scanner/ScannerLayout"));
+const ScannerCommandDeck = lazy(() => import("./components/scanner/ScannerCommandDeck"));
+const ScannerExecution = lazy(() => import("./components/scanner/ScannerExecution"));
+const ScannerDatasets = lazy(() => import("./components/scanner/ScannerDatasets"));
+const ScannerVisuals = lazy(() => import("./components/scanner/ScannerVisuals"));
 const ScannerFilterLab = lazy(() => import("./ScannerFilterLab"));
+
 
 function PageLoader() {
   return (
@@ -248,6 +249,40 @@ function valueToneClass(value) {
   return "neutral";
 }
 
+function parseTradeDate(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    const asMs = numeric > 1e12 ? numeric : numeric * 1000;
+    const numericDate = new Date(asMs);
+    if (!Number.isNaN(numericDate.getTime())) {
+      return numericDate;
+    }
+  }
+
+  const parsed = new Date(String(value));
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed;
+  }
+
+  return null;
+}
+
+function toDateKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function monthLabel(date) {
+  return date.toLocaleString("en-US", { month: "short" }).toUpperCase();
+}
+
 function normalizeHoldingRow(item, index) {
   const quantity = firstNumeric(item.quantity, item.qty, item.netQty) ?? 0;
   const buyAvg = firstNumeric(item.costPrice, item.buyAvg, item.avgPrice) ?? 0;
@@ -340,7 +375,438 @@ function nseSignalClass(signal) {
   return "signal-skip";
 }
 
+function compactSymbolLabel(value) {
+  const raw = String(value || "");
+  const symbol = raw.includes(":") ? raw.split(":")[1] : raw;
+  return symbol.length > 14 ? `${symbol.slice(0, 14)}...` : symbol;
+}
+
+function formatTooltipValue(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? formatCurrency(number) : "--";
+}
+
+function ChartEmptyState({ title, subtitle }) {
+  return (
+    <div className="chart-empty-state">
+      <strong>{title}</strong>
+      <span>{subtitle}</span>
+    </div>
+  );
+}
+
+function HistoricalPnlHeatmap({ trades }) {
+  const [symbolQuery, setSymbolQuery] = useState("");
+  const [pnlMode, setPnlMode] = useState("combined");
+  const weekLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const [fallbackRows, setFallbackRows] = useState([]);
+  const [fallbackLoading, setFallbackLoading] = useState(false);
+  const [fallbackError, setFallbackError] = useState("");
+
+  const hasTradebookRows = Array.isArray(trades) && trades.length > 0;
+
+  useEffect(() => {
+    if (hasTradebookRows) {
+      setFallbackRows([]);
+      setFallbackError("");
+      setFallbackLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setFallbackLoading(true);
+    setFallbackError("");
+
+    fetchPnlHistory(180)
+      .then((data) => {
+        if (cancelled) return;
+        setFallbackRows(Array.isArray(data.rows) ? data.rows : []);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setFallbackRows([]);
+        setFallbackError(error?.message || "Unable to load fallback historical P&L.");
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setFallbackLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasTradebookRows]);
+
+  const sourceRows = hasTradebookRows ? trades : fallbackRows;
+
+  const normalizedTrades = useMemo(() => sourceRows.map((item, index) => {
+    const symbol = item.symbol || item.n || item.tradingsymbol || "NSE:UNKNOWN";
+    const quantity = firstNumeric(item.qty, item.filledQty, item.tradedQty, item.orderQty, item.quantity) ?? 0;
+    const buyAvg = firstNumeric(item.buyAvg, item.buyPrice, item.avgBuyPrice, item.avg_price) ?? null;
+    const buyValue = firstNumeric(item.buyVal, item.buyValue, item.bv) ?? null;
+    const sellAvg = firstNumeric(item.sellAvg, item.sellPrice, item.avgSellPrice) ?? null;
+    const sellValue = firstNumeric(item.sellVal, item.sellValue, item.sv) ?? null;
+    const realizedPnl = firstNumeric(item.realizedPnl, item.realisedPnl, item.realized_pl, item.realised_pl, item.rpnl, item.pl, item.pnl);
+    const unrealizedPnl = firstNumeric(item.unrealizedPnl, item.unrealisedPnl, item.unrealized_pl, item.unrealised_pl, item.upnl);
+    const chargesTaxes = firstNumeric(item.chargesAndTaxes, item.charges, item.charge, item.taxes, item.tax, item.brokerage) ?? 0;
+    const otherCreditsDebits = firstNumeric(item.otherCreditsDebits, item.otherCreditDebit, item.other_credit_debit) ?? 0;
+    const tradeDate = parseTradeDate(
+      item.tradeDate
+      || item.trade_date
+      || item.tradeDateTime
+      || item.trade_date_time
+      || item.orderDateTime
+      || item.order_date_time
+      || item.date
+      || item.updatedAt
+      || item.createdAt
+      || item.exchTradeTime
+      || item.exchFeedTime
+    );
+
+    return {
+      key: item.id || item.orderId || item.tradeId || `trade-${index}`,
+      symbol,
+      displaySymbol: symbolLabel(symbol),
+      quantity,
+      buyAvg,
+      buyValue,
+      sellAvg,
+      sellValue,
+      realizedPnl: realizedPnl ?? 0,
+      unrealizedPnl: unrealizedPnl ?? 0,
+      chargesTaxes,
+      otherCreditsDebits,
+      date: tradeDate,
+      dateKey: tradeDate ? toDateKey(tradeDate) : null,
+    };
+  }).filter((item) => item.dateKey), [sourceRows]);
+
+  const filteredTrades = useMemo(() => {
+    const query = symbolQuery.trim().toUpperCase();
+    if (!query) return normalizedTrades;
+    return normalizedTrades.filter((item) => (
+      item.symbol.toUpperCase().includes(query)
+      || item.displaySymbol.toUpperCase().includes(query)
+    ));
+  }, [normalizedTrades, symbolQuery]);
+
+  const sortedTrades = useMemo(() => [...filteredTrades].sort((a, b) => b.date - a.date), [filteredTrades]);
+  const hasTradeHistory = sortedTrades.length > 0;
+
+  const dateRange = useMemo(() => {
+    if (!sortedTrades.length) {
+      return { from: null, to: null };
+    }
+    const to = sortedTrades[0].date;
+    const from = sortedTrades[sortedTrades.length - 1].date;
+    return { from, to };
+  }, [sortedTrades]);
+
+  const dailyMap = useMemo(() => {
+    const map = new Map();
+    filteredTrades.forEach((trade) => {
+      const existing = map.get(trade.dateKey) || { realized: 0, unrealized: 0, charges: 0, other: 0 };
+      existing.realized += Number(trade.realizedPnl || 0);
+      existing.unrealized += Number(trade.unrealizedPnl || 0);
+      existing.charges += Number(trade.chargesTaxes || 0);
+      existing.other += Number(trade.otherCreditsDebits || 0);
+      map.set(trade.dateKey, existing);
+    });
+    return map;
+  }, [filteredTrades]);
+
+  const summary = useMemo(() => {
+    let realized = 0;
+    let unrealized = 0;
+    let charges = 0;
+    let other = 0;
+
+    dailyMap.forEach((value) => {
+      realized += value.realized;
+      unrealized += value.unrealized;
+      charges += value.charges;
+      other += value.other;
+    });
+
+    return {
+      realized,
+      unrealized,
+      charges,
+      other,
+      netRealized: realized - charges + other,
+    };
+  }, [dailyMap]);
+
+  const dailyAggregateRows = useMemo(() => {
+    const rows = [];
+    dailyMap.forEach((value, dateKey) => {
+      const combined = Number(value.realized || 0) + Number(value.unrealized || 0);
+      rows.push({
+        date: dateKey,
+        realized: Number(value.realized || 0),
+        unrealized: Number(value.unrealized || 0),
+        combined,
+        charges: Number(value.charges || 0),
+        other: Number(value.other || 0),
+        netRealized: Number(value.realized || 0) - Number(value.charges || 0) + Number(value.other || 0),
+      });
+    });
+    rows.sort((a, b) => a.date.localeCompare(b.date));
+    return rows;
+  }, [dailyMap]);
+
+  const months = useMemo(() => {
+    if (!dateRange.from || !dateRange.to) {
+      return [];
+    }
+
+    const result = [];
+    const start = new Date(dateRange.from.getFullYear(), dateRange.from.getMonth(), 1);
+    const end = new Date(dateRange.to.getFullYear(), dateRange.to.getMonth(), 1);
+    const cursor = new Date(start);
+
+    while (cursor <= end) {
+      const year = cursor.getFullYear();
+      const month = cursor.getMonth();
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      const firstWeekdayMondayBased = (new Date(year, month, 1).getDay() + 6) % 7;
+      const cells = [];
+
+      for (let i = 0; i < firstWeekdayMondayBased; i += 1) {
+        cells.push({ key: `empty-${year}-${month}-${i}`, empty: true });
+      }
+
+      for (let day = 1; day <= daysInMonth; day += 1) {
+        const date = new Date(year, month, day);
+        const key = toDateKey(date);
+        const value = dailyMap.get(key) || { realized: 0, unrealized: 0 };
+        const combined = value.realized + value.unrealized;
+        const pnlValue = pnlMode === "realized" ? value.realized : pnlMode === "unrealized" ? value.unrealized : combined;
+
+        cells.push({ key, day, pnlValue, realized: value.realized, unrealized: value.unrealized, combined });
+      }
+
+      result.push({ key: `${year}-${month + 1}`, label: monthLabel(cursor), cells });
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+
+    return result;
+  }, [dateRange.from, dateRange.to, dailyMap, pnlMode]);
+
+  const maxAbsPnl = useMemo(() => {
+    const values = [];
+    months.forEach((month) => {
+      month.cells.forEach((cell) => {
+        if (!cell.empty) values.push(Math.abs(Number(cell.pnlValue || 0)));
+      });
+    });
+    return Math.max(...values, 1);
+  }, [months]);
+
+  const cellStyle = (value) => {
+    const abs = Math.abs(Number(value || 0));
+    if (abs < 0.01) {
+      return { backgroundColor: "rgba(139, 157, 185, 0.18)" };
+    }
+    const strength = Math.min(0.95, 0.2 + (abs / maxAbsPnl) * 0.75);
+    if (value > 0) {
+      return { backgroundColor: `rgba(19, 222, 185, ${strength})` };
+    }
+    return { backgroundColor: `rgba(250, 137, 107, ${strength})` };
+  };
+
+  const lastUpdatedText = sortedTrades.length
+    ? sortedTrades[0].date.toLocaleString("en-IN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : "No tradebook data";
+
+  const dateRangeText = dateRange.from && dateRange.to
+    ? `${dateRange.from.toISOString().slice(0, 10)} ~ ${dateRange.to.toISOString().slice(0, 10)}`
+    : "No history available";
+
+  return (
+    <div className="portfolio-heatmap-shell">
+      <div className="portfolio-heatmap-toolbar">
+        <label>
+          <span>Segment</span>
+          <select value="equity" disabled>
+            <option value="equity">Equity</option>
+          </select>
+        </label>
+
+        <label>
+          <span>P&amp;L</span>
+          <select value={pnlMode} onChange={(event) => setPnlMode(event.target.value)}>
+            <option value="combined">Combined</option>
+            <option value="realized">Realized</option>
+            <option value="unrealized">Unrealized</option>
+          </select>
+        </label>
+
+        <label>
+          <span>Symbol</span>
+          <input
+            type="text"
+            placeholder="eg. INFY"
+            value={symbolQuery}
+            onChange={(event) => setSymbolQuery(event.target.value)}
+          />
+        </label>
+
+        <label>
+          <span>Date range</span>
+          <input
+            type="text"
+            readOnly
+            value={dateRangeText}
+          />
+        </label>
+
+        <button
+          type="button"
+          className="secondary-btn portfolio-heatmap-download-btn"
+          disabled={!dailyAggregateRows.length}
+          onClick={() => exportRowsToCsv("historical_pnl_daily", dailyAggregateRows, [
+            { key: "date", label: "Date" },
+            { key: "realized", label: "Realized P&L" },
+            { key: "unrealized", label: "Unrealized P&L" },
+            { key: "combined", label: "Combined P&L" },
+            { key: "charges", label: "Charges & Taxes" },
+            { key: "other", label: "Other Credits/Debits" },
+            { key: "netRealized", label: "Net Realized P&L" },
+          ])}
+        >
+          Download CSV
+        </button>
+      </div>
+
+      <div className="portfolio-heatmap-range">
+        <span className="portfolio-heatmap-range-icon">⏱</span>
+        <span>{dateRange.from && dateRange.to ? `${dateRange.from.toISOString().slice(0, 10)} to ${dateRange.to.toISOString().slice(0, 10)}` : "No historical trade range"}</span>
+        <span className="portfolio-heatmap-range-sep">|</span>
+        <span>{`Last updated: ${lastUpdatedText}`}</span>
+      </div>
+
+      {hasTradeHistory ? (
+        <>
+          <div className="portfolio-heatmap-weekdays" aria-hidden="true">
+            {weekLabels.map((label) => (
+              <span key={label}>{label}</span>
+            ))}
+          </div>
+
+          <div className="portfolio-heatmap-months">
+            {months.map((month) => (
+              <div key={month.key} className="portfolio-heatmap-month">
+                <div className="portfolio-heatmap-grid">
+                  {month.cells.map((cell) => (
+                    <div
+                      key={cell.key}
+                      className={`portfolio-heatmap-cell${cell.empty ? " empty" : ""}`}
+                      style={cell.empty ? undefined : cellStyle(cell.pnlValue)}
+                      title={cell.empty ? "" : `${cell.key} | ${formatSignedCurrency(cell.pnlValue)}`}
+                    />
+                  ))}
+                </div>
+                <div className="portfolio-heatmap-month-label">{month.label}</div>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="portfolio-heatmap-empty">
+          <h3>No historical P&amp;L data received</h3>
+          <p>
+            {fallbackLoading
+              ? "Tradebook is empty. Loading fallback historical P&L from holdings history..."
+              : fallbackError
+                ? `Fallback request failed: ${fallbackError}`
+                : "FYERS returned an empty tradebook and no holdings-history fallback points were generated yet."}
+          </p>
+        </div>
+      )}
+
+      <div className="portfolio-heatmap-summary">
+        <div className="portfolio-heatmap-summary-item">
+          <span>Realised P&amp;L</span>
+          <strong className={valueToneClass(summary.realized)}>{formatSignedCurrency(summary.realized, true)}</strong>
+        </div>
+        <div className="portfolio-heatmap-summary-item">
+          <span>Charges &amp; taxes</span>
+          <strong>{formatCompactCurrency(summary.charges)}</strong>
+        </div>
+        <div className="portfolio-heatmap-summary-item">
+          <span>Other credits &amp; debits</span>
+          <strong className={valueToneClass(summary.other)}>{formatSignedCurrency(summary.other, true)}</strong>
+        </div>
+        <div className="portfolio-heatmap-summary-item">
+          <span>Net realised P&amp;L</span>
+          <strong className={valueToneClass(summary.netRealized)}>{formatSignedCurrency(summary.netRealized, true)}</strong>
+        </div>
+        <div className="portfolio-heatmap-summary-item">
+          <span>Unrealised P&amp;L</span>
+          <strong className={valueToneClass(summary.unrealized)}>{formatSignedCurrency(summary.unrealized, true)}</strong>
+        </div>
+      </div>
+
+      <div className="portfolio-table-wrap">
+        <table className="portfolio-table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th className="numeric">Qty.</th>
+              <th className="numeric">Buy avg.</th>
+              <th className="numeric">Buy value</th>
+              <th className="numeric">Sell avg.</th>
+              <th className="numeric">Sell value</th>
+              <th className="numeric">Realised P&amp;L</th>
+              <th className="numeric">Unrealised P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedTrades.slice(0, 20).map((row) => (
+              <tr key={row.key}>
+                <td>
+                  <div className="portfolio-symbol-cell">
+                    <span className="portfolio-symbol-main">{row.displaySymbol}</span>
+                    <span className="portfolio-symbol-sub">{row.dateKey}</span>
+                  </div>
+                </td>
+                <td className="numeric">{formatQty(row.quantity)}</td>
+                <td className="numeric">{row.buyAvg === null ? "--" : formatCurrency(row.buyAvg)}</td>
+                <td className="numeric">{row.buyValue === null ? "--" : formatCurrency(row.buyValue)}</td>
+                <td className="numeric">{row.sellAvg === null ? "--" : formatCurrency(row.sellAvg)}</td>
+                <td className="numeric">{row.sellValue === null ? "--" : formatCurrency(row.sellValue)}</td>
+                <td className="numeric">
+                  <div className={`portfolio-value-stack ${valueToneClass(row.realizedPnl)}`}>
+                    <span>{formatSignedCurrency(row.realizedPnl)}</span>
+                  </div>
+                </td>
+                <td className="numeric">
+                  <div className={`portfolio-value-stack ${valueToneClass(row.unrealizedPnl)}`}>
+                    <span>{formatSignedCurrency(row.unrealizedPnl)}</span>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {sortedTrades.length === 0 ? (
+              <tr>
+                <td colSpan="8" className="portfolio-empty-row">No tradebook data available for the selected filter.</td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function SmartChartsBoard({ pnlSeries, holdings }) {
+  const isDarkTheme = document.documentElement.getAttribute("data-theme") === "dark";
+  const gridStroke = isDarkTheme ? "rgba(149, 184, 235, 0.28)" : "#e7e2f7";
+  const axisColor = isDarkTheme ? "#94aed1" : "#6c7c95";
+
   const allocation = holdings
     .map((item) => {
       const value = Number(item.marketVal ?? Number(item.quantity || 0) * Number(item.ltp || 0));
@@ -361,6 +827,11 @@ function SmartChartsBoard({ pnlSeries, holdings }) {
     .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl))
     .slice(0, 6);
 
+  const hasPnlSeries = pnlSeries.length > 1;
+  const hasAnyPnLMovement = pnlSeries.some((item) => Math.abs(Number(item.total || 0)) > 0.0001);
+  const hasAllocation = allocation.length > 0;
+  const hasTopPnl = topPnl.length > 0;
+
   return (
     <section className="smartcharts-grid">
       <div className="chart-panel">
@@ -371,15 +842,36 @@ function SmartChartsBoard({ pnlSeries, holdings }) {
           </div>
         </div>
         <div className="chart-box">
-          <ResponsiveContainer width="100%" height={240}>
-            <LineChart data={pnlSeries}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#ece8f8" />
-              <XAxis dataKey="time" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip />
-              <Line type="monotone" dataKey="total" stroke="#2b0f8a" strokeWidth={3} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
+          {hasPnlSeries ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <LineChart data={pnlSeries} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 4" stroke={gridStroke} />
+                <XAxis dataKey="time" tick={{ fontSize: 11, fill: axisColor }} minTickGap={24} />
+                <YAxis
+                  tick={{ fontSize: 11, fill: axisColor }}
+                  width={72}
+                  tickFormatter={(value) => `\u20b9${Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`}
+                />
+                <Tooltip
+                  formatter={(value) => [formatTooltipValue(value), "P&L"]}
+                  labelFormatter={(label) => `Time: ${label || "--"}`}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="total"
+                  stroke={hasAnyPnLMovement ? "#5d87ff" : "#8fa2c0"}
+                  strokeWidth={3}
+                  dot={false}
+                  activeDot={{ r: 5 }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <ChartEmptyState
+              title="No trend data yet"
+              subtitle="Live P&L points will appear after holdings and positions start updating."
+            />
+          )}
         </div>
       </div>
 
@@ -391,17 +883,28 @@ function SmartChartsBoard({ pnlSeries, holdings }) {
           </div>
         </div>
         <div className="chart-box">
-          <ResponsiveContainer width="100%" height={240}>
-            <AreaChart data={pnlSeries}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#ece8f8" />
-              <XAxis dataKey="time" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip />
-              <Legend />
-              <Area type="monotone" dataKey="holdings" stroke="#7f55d9" fill="#d9c8ff" fillOpacity={0.7} />
-              <Area type="monotone" dataKey="positions" stroke="#2b0f8a" fill="#bfb0ef" fillOpacity={0.7} />
-            </AreaChart>
-          </ResponsiveContainer>
+          {hasPnlSeries ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <AreaChart data={pnlSeries} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 4" stroke={gridStroke} />
+                <XAxis dataKey="time" tick={{ fontSize: 11, fill: axisColor }} minTickGap={24} />
+                <YAxis
+                  tick={{ fontSize: 11, fill: axisColor }}
+                  width={72}
+                  tickFormatter={(value) => `\u20b9${Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`}
+                />
+                <Tooltip formatter={(value) => [formatTooltipValue(value), ""]} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Area type="monotone" dataKey="holdings" stroke="#7460ee" fill="#b7a4ff" fillOpacity={0.5} />
+                <Area type="monotone" dataKey="positions" stroke="#13deb9" fill="#9df3e1" fillOpacity={0.45} />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : (
+            <ChartEmptyState
+              title="No holdings/positions history"
+              subtitle="This view needs more than one live snapshot to plot comparisons."
+            />
+          )}
         </div>
       </div>
 
@@ -413,17 +916,32 @@ function SmartChartsBoard({ pnlSeries, holdings }) {
           </div>
         </div>
         <div className="chart-box">
-          <ResponsiveContainer width="100%" height={240}>
-            <PieChart>
-              <Pie data={allocation} dataKey="value" nameKey="name" innerRadius={60} outerRadius={95} paddingAngle={2}>
-                {allocation.map((entry, index) => (
-                  <Cell key={entry.name} fill={CHART_COLORS[index % CHART_COLORS.length]} />
-                ))}
-              </Pie>
-              <Tooltip />
-              <Legend />
-            </PieChart>
-          </ResponsiveContainer>
+          {hasAllocation ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <PieChart>
+                <Pie
+                  data={allocation}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={56}
+                  outerRadius={92}
+                  paddingAngle={2}
+                  labelLine={false}
+                >
+                  {allocation.map((entry, index) => (
+                    <Cell key={entry.name} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+                  ))}
+                </Pie>
+                <Tooltip formatter={(value) => [formatTooltipValue(value), "Market Value"]} />
+                <Legend formatter={(value) => compactSymbolLabel(value)} wrapperStyle={{ fontSize: 12 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <ChartEmptyState
+              title="No allocation yet"
+              subtitle="Add holdings with market value to see sector concentration and risk spread."
+            />
+          )}
         </div>
       </div>
 
@@ -435,43 +953,111 @@ function SmartChartsBoard({ pnlSeries, holdings }) {
           </div>
         </div>
         <div className="chart-box">
-          <ResponsiveContainer width="100%" height={240}>
-            <BarChart data={topPnl}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#ece8f8" />
-              <XAxis dataKey="symbol" tick={{ fontSize: 10 }} />
-              <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip />
-              <Bar dataKey="pnl" fill="#2b0f8a" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+          {hasTopPnl ? (
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={topPnl} layout="vertical" margin={{ top: 8, right: 12, left: 24, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 4" stroke={gridStroke} horizontal={false} />
+                <XAxis
+                  type="number"
+                  tick={{ fontSize: 11, fill: axisColor }}
+                  tickFormatter={(value) => Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                />
+                <YAxis type="category" dataKey="symbol" width={110} tick={{ fontSize: 10, fill: axisColor }} tickFormatter={compactSymbolLabel} />
+                <Tooltip
+                  formatter={(value) => [formatTooltipValue(value), "P&L"]}
+                  labelFormatter={(label) => compactSymbolLabel(label)}
+                />
+                <Bar dataKey="pnl" radius={[0, 6, 6, 0]}>
+                  {topPnl.map((item) => (
+                    <Cell key={item.symbol} fill={item.pnl >= 0 ? "#13deb9" : "#fa896b"} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <ChartEmptyState
+              title="No P&L movers"
+              subtitle="Top winners and losers will appear once holdings start posting profit/loss values."
+            />
+          )}
         </div>
       </div>
     </section>
   );
 }
 
-function PortfolioTabbedSection({ holdings, positions }) {
+function PortfolioTabbedSection({ holdings, positions, trades }) {
   const [primaryTab, setPrimaryTab] = useState("holdings");
-  const [secondaryTab, setSecondaryTab] = useState("stocks");
   const [performanceTab, setPerformanceTab] = useState("all");
   const [query, setQuery] = useState("");
+  const [portfolioQuotes, setPortfolioQuotes] = useState({});
 
   const holdingRows = useMemo(() => holdings.map(normalizeHoldingRow), [holdings]);
   const positionRows = useMemo(() => positions.map(normalizePositionRow), [positions]);
   const activeRows = primaryTab === "holdings" ? holdingRows : positionRows;
-  const summary = useMemo(() => summarizePortfolioRows(activeRows), [activeRows]);
+  const rowsWithLiveDayPnl = useMemo(() => activeRows.map((row) => {
+    if (row.dayPnl !== null && row.dayPnl !== undefined) {
+      return row;
+    }
+
+    const quote = portfolioQuotes[row.symbol] || {};
+    const quoteChange = firstNumeric(quote.ch, quote.change, quote.netChange);
+    const quoteChangePct = firstNumeric(quote.chp, quote.changePercent, row.dayPct);
+    const qty = Math.abs(Number(row.quantity || 0));
+    const current = Number(row.current || 0);
+
+    const derivedDayPnl = quoteChange !== null
+      ? quoteChange * qty
+      : quoteChangePct !== null && current
+        ? current * (quoteChangePct / 100)
+        : null;
+
+    return {
+      ...row,
+      dayPnl: derivedDayPnl,
+      dayPct: row.dayPct ?? quoteChangePct,
+    };
+  }), [activeRows, portfolioQuotes]);
+
+  const summary = useMemo(() => summarizePortfolioRows(rowsWithLiveDayPnl), [rowsWithLiveDayPnl]);
   const gainersCount = activeRows.filter((row) => row.totalPnl > 0).length;
   const losersCount = activeRows.filter((row) => row.totalPnl < 0).length;
   const activeRowsCount = activeRows.length;
   const gainersShare = activeRowsCount ? (gainersCount / activeRowsCount) * 100 : 0;
   const losersShare = activeRowsCount ? (losersCount / activeRowsCount) * 100 : 0;
 
-  const filteredRows = useMemo(() => {
-    if (secondaryTab !== "stocks") {
-      return [];
+  useEffect(() => {
+    const symbols = [...new Set(activeRows.map((row) => row.symbol).filter(Boolean))];
+    if (!symbols.length) {
+      setPortfolioQuotes({});
+      return undefined;
     }
 
-    let rows = activeRows;
+    let cancelled = false;
+    fetchQuotes(symbols)
+      .then((data) => {
+        if (cancelled) return;
+        const next = {};
+        (data.d || []).forEach((item) => {
+          const sym = item.n || item.v?.symbol;
+          if (!sym) return;
+          next[sym] = item.v || item;
+        });
+        setPortfolioQuotes(next);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPortfolioQuotes({});
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRows]);
+
+  const filteredRows = useMemo(() => {
+    let rows = rowsWithLiveDayPnl;
     if (performanceTab === "gainers") {
       rows = rows.filter((row) => row.totalPnl > 0);
     } else if (performanceTab === "losers") {
@@ -489,14 +1075,7 @@ function PortfolioTabbedSection({ holdings, positions }) {
       || row.exchange.toUpperCase().includes(normalizedQuery)
       || (row.sideLabel || "").toUpperCase().includes(normalizedQuery)
     ));
-  }, [activeRows, performanceTab, query, secondaryTab]);
-
-  const secondaryTabs = [
-    { id: "stocks", label: "Stocks" },
-    { id: "mutual-funds", label: "Mutual funds" },
-    { id: "pledge", label: "Pledge" },
-    { id: "instant", label: "Instant" },
-  ];
+  }, [rowsWithLiveDayPnl, performanceTab, query]);
 
   return (
     <section className="table-panel portfolio-tab-shell">
@@ -506,7 +1085,6 @@ function PortfolioTabbedSection({ holdings, positions }) {
           className={`portfolio-primary-tab${primaryTab === "positions" ? " active" : ""}`}
           onClick={() => {
             setPrimaryTab("positions");
-            setSecondaryTab("stocks");
             setPerformanceTab("all");
             setQuery("");
           }}
@@ -518,34 +1096,29 @@ function PortfolioTabbedSection({ holdings, positions }) {
           className={`portfolio-primary-tab${primaryTab === "holdings" ? " active" : ""}`}
           onClick={() => {
             setPrimaryTab("holdings");
-            setSecondaryTab("stocks");
             setPerformanceTab("all");
             setQuery("");
           }}
         >
           Holdings
         </button>
+        <button
+          type="button"
+          className={`portfolio-primary-tab${primaryTab === "pnl-heatmap" ? " active" : ""}`}
+          onClick={() => {
+            setPrimaryTab("pnl-heatmap");
+            setPerformanceTab("all");
+            setQuery("");
+          }}
+        >
+          P&amp;L Heatmap
+        </button>
       </div>
 
-      <div className="portfolio-secondary-tabs">
-        {secondaryTabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={`portfolio-secondary-tab${secondaryTab === tab.id ? " active" : ""}`}
-            onClick={() => {
-              setSecondaryTab(tab.id);
-              setPerformanceTab("all");
-              setQuery("");
-            }}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </div>
-
-      {secondaryTab === "stocks" ? (
-        <>
+      {primaryTab === "pnl-heatmap" ? (
+        <HistoricalPnlHeatmap trades={trades} />
+      ) : (
+      <>
           <div className="portfolio-summary-strip">
             <div className="portfolio-summary-item">
               <span className="portfolio-summary-label">Invested</span>
@@ -558,7 +1131,7 @@ function PortfolioTabbedSection({ holdings, positions }) {
             <div className="portfolio-summary-item">
               <span className="portfolio-summary-label">Today&apos;s P&amp;L</span>
               <strong className={`portfolio-summary-value ${valueToneClass(summary.dayPnl)}`}>
-                {summary.dayPnl === null ? "N/A" : `${formatSignedCurrency(summary.dayPnl, true)} (${formatSignedPercent(summary.dayPct)})`}
+                {summary.dayPnl === null ? "--" : `${formatSignedCurrency(summary.dayPnl, true)} (${formatSignedPercent(summary.dayPct)})`}
               </strong>
             </div>
             <div className="portfolio-summary-item">
@@ -635,7 +1208,7 @@ function PortfolioTabbedSection({ holdings, positions }) {
                     </td>
                     <td className="numeric">
                       {row.dayPnl === null ? (
-                        <span className="portfolio-na">N/A</span>
+                        <span className="portfolio-na">--</span>
                       ) : (
                         <div className={`portfolio-value-stack ${valueToneClass(row.dayPnl)}`}>
                           <span>{formatSignedCurrency(row.dayPnl)}</span>
@@ -655,12 +1228,7 @@ function PortfolioTabbedSection({ holdings, positions }) {
               </tbody>
             </table>
           </div>
-        </>
-      ) : (
-        <div className="portfolio-empty-state">
-          <h3>{secondaryTabs.find((tab) => tab.id === secondaryTab)?.label} section</h3>
-          <p>The current FYERS snapshot only exposes stock {primaryTab}. Switch back to Stocks to inspect the live table.</p>
-        </div>
+      </>
       )}
     </section>
   );
@@ -1074,6 +1642,60 @@ export default function App() {
     };
   }, [authenticated, settings.liveUpdatesEnabled, settings.reconnectSeconds, homeMarketSymbolsCsv]);
 
+  // Fallback polling keeps dashboard/watchlist cards fresh when websocket is unavailable.
+  useEffect(() => {
+    if (!authenticated || !settings.liveUpdatesEnabled) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const pollQuotes = async () => {
+      if (cancelled || connectionStatus === "live") {
+        return;
+      }
+      try {
+        const data = await fetchQuotes(HOME_MARKET_SYMBOLS);
+        if (!cancelled && Array.isArray(data?.d)) {
+          setWatchlist(data.d);
+        }
+      } catch {
+        // Keep silent to avoid noisy transient errors.
+      }
+    };
+
+    const pollDashboard = async () => {
+      if (cancelled || connectionStatus === "live" || location.pathname !== "/portfolio") {
+        return;
+      }
+      try {
+        const data = await fetchDashboard();
+        if (!cancelled) {
+          setDashboard(data);
+        }
+      } catch {
+        // Keep silent to avoid noisy transient errors.
+      }
+    };
+
+    void pollQuotes();
+    void pollDashboard();
+
+    const quoteTimer = window.setInterval(() => {
+      void pollQuotes();
+    }, 5000);
+
+    const dashboardTimer = window.setInterval(() => {
+      void pollDashboard();
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(quoteTimer);
+      window.clearInterval(dashboardTimer);
+    };
+  }, [authenticated, settings.liveUpdatesEnabled, connectionStatus, location.pathname]);
+
   useEffect(() => {
     if (!authenticated || !strategyAutoEnabled) {
       return undefined;
@@ -1123,11 +1745,21 @@ export default function App() {
   async function initialize() {
     try {
       setLoading(true);
+      setError("");
       const session = await fetchSession();
       setAuthenticated(Boolean(session.authenticated));
+      if (!session.authenticated && session.message) {
+        setError(session.message);
+      }
+      if (session.warning) {
+        setError(session.warning);
+      }
       if (session.authenticated) {
         const data = await fetchDashboard();
         setDashboard(data);
+        if (data?.profile?.s === "error" && data?.profile?.message) {
+          setError(data.profile.message);
+        }
       }
     } catch (err) {
       setError(err.message);
@@ -1143,6 +1775,9 @@ export default function App() {
       }
       const data = await fetchDashboard();
       setDashboard(data);
+      if (data?.profile?.s === "error" && data?.profile?.message) {
+        setError(data.profile.message);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1343,9 +1978,8 @@ export default function App() {
     "/markets":   "Markets & Watchlists",
     "/scanner":   "Command Deck",
     "/scanner/execution": "Execution",
-    "/scanner/visuals":   "Visuals",
-    "/scanner/datasets":  "Datasets",
-    "/scanner/filters":   "Filter Lab",
+    "/scanner/datasets":  "Analyst",
+
     "/orders":    "Orders & Trades",
     "/strategy":  "Strategy",
     "/settings":  "Settings",
@@ -1357,8 +1991,9 @@ export default function App() {
 
   const MAIN_NAV_ITEMS = [
     { to: "/dashboard", label: "Home", Icon: IcoDashboard },
-    { to: "/portfolio", label: "Portfolio",  Icon: IcoBriefcase },
     { to: "/markets",   label: "Markets",    Icon: IcoMarkets },
+    { to: "/scanner/datasets", label: "Analyst", Icon: IcoChart },
+    { to: "/portfolio", label: "Portfolio",  Icon: IcoBriefcase },
     { to: "/orders",    label: "Orders",     Icon: IcoOrders },
     { to: "/strategy",  label: "Strategy",   Icon: IcoStrategy },
     { to: "/settings",  label: "Settings",   Icon: IcoSettings },
@@ -1367,9 +2002,6 @@ export default function App() {
   const SCANNER_NAV_ITEMS = [
     { to: "/scanner",            label: "Command Deck", Icon: IcoCommand, end: true },
     { to: "/scanner/execution",  label: "Execution",    Icon: IcoTune },
-    { to: "/scanner/visuals",    label: "Visuals",      Icon: IcoChart },
-    { to: "/scanner/datasets",   label: "Datasets",     Icon: IcoTable },
-    { to: "/scanner/filters",    label: "Filter Lab",   Icon: IcoFilter },
   ];
 
   return (
@@ -1532,7 +2164,7 @@ export default function App() {
                 {/* Charts */}
                 <SmartChartsBoard pnlSeries={pnlSeries} holdings={holdings} />
 
-                <PortfolioTabbedSection holdings={holdings} positions={positions} />
+                <PortfolioTabbedSection holdings={holdings} positions={positions} trades={trades} />
               </>
             )}
           />

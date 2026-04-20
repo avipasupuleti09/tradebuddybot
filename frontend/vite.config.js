@@ -4,7 +4,7 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5173,
+    port: 5100,
     proxy: {
       "/scanner-api": {
         target: "http://localhost:8001",

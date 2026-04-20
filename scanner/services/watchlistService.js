@@ -26,6 +26,24 @@ function extractRows(payload) {
   return []
 }
 
+function extractWatchlistRows(payload) {
+  const directWatchlists = payload?.watchlists
+  if (directWatchlists && typeof directWatchlists === 'object' && !Array.isArray(directWatchlists)) {
+    for (const symbols of Object.values(directWatchlists)) {
+      if (Array.isArray(symbols) && symbols.length) return symbols
+    }
+  }
+
+  const catalogWatchlists = payload?.tabs?.my?.watchlists
+  if (catalogWatchlists && typeof catalogWatchlists === 'object' && !Array.isArray(catalogWatchlists)) {
+    for (const symbols of Object.values(catalogWatchlists)) {
+      if (Array.isArray(symbols) && symbols.length) return symbols
+    }
+  }
+
+  return extractRows(payload)
+}
+
 function normalizeSymbol(value) {
   return toFyersTicker(typeof value === 'string' ? value : String(value ?? '').trim())
 }
@@ -120,9 +138,14 @@ export async function loadWatchlist(limit = null) {
   }
 
   if (config.watchlistApiUrl) {
-    const payload = await fetchJson(config.watchlistApiUrl, 'Watchlist API')
-    const tickers = normalizeWatchlistRows(extractRows(payload))
-    return limit ? tickers.slice(0, limit) : tickers
+    try {
+      const payload = await fetchJson(config.watchlistApiUrl, 'Watchlist API')
+      const tickers = normalizeWatchlistRows(extractWatchlistRows(payload))
+      if (tickers.length) {
+        return limit ? tickers.slice(0, limit) : tickers
+      }
+    } catch {
+    }
   }
 
   return loadWatchlistFromFile(limit)

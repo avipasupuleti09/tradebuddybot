@@ -46,6 +46,11 @@ export async function fetchDashboard() {
   return parse(response);
 }
 
+export async function fetchPnlHistory(days = 180) {
+  const response = await request(`/api/pnl-history?days=${encodeURIComponent(days)}`);
+  return parse(response);
+}
+
 export async function logout() {
   const response = await request(`/api/logout`, {
     method: "POST",
