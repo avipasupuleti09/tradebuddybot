@@ -26,7 +26,7 @@ FYERS_SECRET_KEY=...
 FYERS_REDIRECT_URI=http://localhost:5000/api/auth/callback
 FYERS_USER_ID=...
 FYERS_TOTP_KEY=...
-FYERS_PIN=...
+FYERS_PIN=OPTIONAL_FALLBACK_PIN
 FYERS_TOKEN_FILE=.tokens/fyers_token.json
 FYERS_ORDER_STATIC_IP=YOUR_WHITELISTED_STATIC_IP
 FYERS_ENFORCE_STATIC_IP_CHECK=true
@@ -34,6 +34,8 @@ PUBLIC_IP_CHECK_URL=https://api.ipify.org
 FYERS_PAPER_TRADE_MODE=true
 FRONTEND_URL=http://localhost:5100
 ```
+
+The app login screen now requires the user to enter the 4-digit broker account PIN before login. `FYERS_PIN` remains optional and is only useful for non-interactive backend login automation outside the UI endpoint.
 
 Important: the same redirect URI must be configured in your FYERS app settings.
 

@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { fetchWatchlists, getScannerDashboard, runScannerScan, getScannerLive } from "../../api";
+import { fetchAllNseSymbols, fetchDirectScreener, fetchWatchlists } from "../../api";
 import { buildClientScannerPayloadFromRows } from "../../lib/scannerCore";
+import { filterSymbolsByNseGroup } from "../../nseGroups";
 import {
   buildScanRequest,
   pickLeadRow,
@@ -15,6 +16,25 @@ import { IcRadar, IcBolt, IcTrend, IcHub } from "../../components/common/Icons";
 
 const ScannerCtx = createContext(null);
 export const useScannerContext = () => useContext(ScannerCtx);
+
+const DEFAULT_DIRECT_GROUP_IDS = [
+  "nifty-50",
+  "niftynxt50",
+  "nifty-midcap-50",
+  "nifty-bank",
+  "fin-nifty",
+  "nifty-it",
+  "nifty-pharma",
+  "nifty-auto",
+  "nifty-fmcg",
+  "nifty-metals",
+  "nifty-commodities",
+  "nifty-energy",
+  "nifty-oil-and-gas",
+  "nifty-healthcare",
+  "gold-silver",
+  "bse-sensex",
+];
 
 export function ScannerProvider({ children }) {
   const [dashboard, setDashboard] = useState(null);
@@ -37,9 +57,24 @@ export function ScannerProvider({ children }) {
   const [myWatchlists, setMyWatchlists] = useState({});
   const [selectedWatchlistName, setSelectedWatchlistName] = useState("");
   const [watchlistLoading, setWatchlistLoading] = useState(false);
+  const [marketSymbols, setMarketSymbols] = useState([]);
+  const initialLoadRef = useRef(false);
+
+  const defaultUniverseSymbols = useMemo(
+    () => buildDefaultDirectUniverseSymbols(marketSymbols),
+    [marketSymbols],
+  );
 
   // ── Initial load ──────────────────────────────────────────────────────────
-  useEffect(() => { void refreshDashboard(); }, []);
+  useEffect(() => { void loadMarketSymbols(); }, []);
+
+  useEffect(() => {
+    if (initialLoadRef.current || !defaultUniverseSymbols.length) {
+      return;
+    }
+    initialLoadRef.current = true;
+    void refreshDashboard(defaultUniverseSymbols);
+  }, [defaultUniverseSymbols]);
 
   useEffect(() => { void loadMyWatchlists(); }, []);
 
@@ -77,15 +112,36 @@ export function ScannerProvider({ children }) {
     return () => window.clearInterval(timer);
   }, [activeScanRequest, dataSource, liveInterval, liveRows]);
 
-  async function refreshDashboard() {
+  async function loadMarketSymbols() {
+    try {
+      const payload = await fetchAllNseSymbols();
+      setMarketSymbols(payload?.results || []);
+    } catch {
+      setMarketSymbols([]);
+    }
+  }
+
+  async function refreshDashboard(requestSymbols = null) {
+    const symbolsToScan = normalizeRequestedSymbols(
+      requestSymbols || activeScanRequest?.watchlistSymbols || defaultUniverseSymbols,
+      300,
+    );
+    if (!symbolsToScan.length) {
+      setLoading(false);
+      setError("No symbols are available for the direct FYERS screener universe.");
+      return;
+    }
+
     try {
       setLoading(true);
       setLoadStartTime(Date.now());
       setError("");
-      const payload = await getScannerDashboard(300);
+      const payload = await fetchDirectScreener(symbolsToScan, 300);
+      setActiveScanRequest({ watchlistSymbols: symbolsToScan });
       setDashboard(payload);
+      setLiveData(payload?.datasets?.liveMarket || []);
     } catch (err) {
-      setError(err.message || "Failed to load scanner dashboard");
+      setError(err.message || "Failed to load direct FYERS screener dashboard");
     } finally {
       setLoading(false);
       setLoadStartTime(null);
@@ -111,16 +167,22 @@ export function ScannerProvider({ children }) {
   }
 
   async function runScanForWatchlist(symbols) {
+    const normalizedSymbols = normalizeRequestedSymbols(symbols, 300);
+    if (!normalizedSymbols.length) {
+      return;
+    }
+
     try {
       setScanning(true);
       setLoadStartTime(Date.now());
       setError("");
-      const requestPayload = { watchlistSymbols: symbols };
-      const payload = await runScannerScan(300, requestPayload);
+      const requestPayload = { watchlistSymbols: normalizedSymbols };
+      const payload = await fetchDirectScreener(normalizedSymbols, 300);
       setActiveScanRequest(requestPayload);
       setDashboard(payload);
+      setLiveData(payload?.datasets?.liveMarket || []);
     } catch (err) {
-      setError(err.message || "Failed to run watchlist scan");
+      setError(err.message || "Failed to run direct FYERS watchlist scan");
     } finally {
       setScanning(false);
       setLoadStartTime(null);
@@ -140,9 +202,14 @@ export function ScannerProvider({ children }) {
   }
 
   async function refreshLive() {
+    const symbolsToScan = normalizeRequestedSymbols(activeScanRequest?.watchlistSymbols || defaultUniverseSymbols, liveRows);
+    if (!symbolsToScan.length) {
+      return;
+    }
+
     try {
-      const payload = await getScannerLive(liveRows, activeScanRequest);
-      setLiveData(payload.rows || []);
+      const payload = await fetchDirectScreener(symbolsToScan, liveRows);
+      setLiveData(payload?.datasets?.liveMarket || []);
     } catch (err) {
       setError(err.message || "Failed to load live data");
     }
@@ -154,11 +221,13 @@ export function ScannerProvider({ children }) {
       setLoadStartTime(Date.now());
       setError("");
       const requestPayload = buildScanRequest(symbolInput, sectorOverridesInput, deliveryOverridesInput);
-      const payload = await runScannerScan(300, requestPayload);
+      const symbolsToScan = normalizeRequestedSymbols(requestPayload.watchlistSymbols || defaultUniverseSymbols, 300);
+      const payload = await fetchDirectScreener(symbolsToScan, 300);
       setActiveScanRequest(requestPayload);
       setDashboard(payload);
+      setLiveData(payload?.datasets?.liveMarket || []);
     } catch (err) {
-      setError(err.message || "Failed to run scan");
+      setError(err.message || "Failed to run direct FYERS scan");
     } finally {
       setScanning(false);
       setLoadStartTime(null);
@@ -348,4 +417,43 @@ export function ScannerProvider({ children }) {
   };
 
   return <ScannerCtx.Provider value={ctx}>{children}</ScannerCtx.Provider>;
+}
+
+function buildDefaultDirectUniverseSymbols(symbolRows) {
+  const catalogRows = (symbolRows || []).map((row) => ({
+    symbol: row.symbol || row.Symbol || row.ticker || row.Ticker || "",
+    short: row.short || row.Short || "",
+    name: row.name || row.Name || row.description || row.Description || "",
+  }));
+
+  if (!catalogRows.length) {
+    return [];
+  }
+
+  const symbols = new Set();
+  DEFAULT_DIRECT_GROUP_IDS.forEach((groupId) => {
+    filterSymbolsByNseGroup(catalogRows, groupId).forEach((row) => {
+      const symbol = normalizeSymbol(row.symbol || row.Symbol || row.ticker || row.Ticker);
+      if (symbol) {
+        symbols.add(symbol);
+      }
+    });
+  });
+
+  if (symbols.size) {
+    return Array.from(symbols).slice(0, 300);
+  }
+
+  return catalogRows.slice(0, 250).map((row) => normalizeSymbol(row.symbol)).filter(Boolean);
+}
+
+function normalizeRequestedSymbols(symbols, limit = 300) {
+  const normalized = (symbols || [])
+    .map((symbol) => normalizeSymbol(symbol))
+    .filter(Boolean);
+  return [...new Set(normalized)].slice(0, limit);
+}
+
+function normalizeSymbol(symbol) {
+  return String(symbol || "").trim().toUpperCase();
 }

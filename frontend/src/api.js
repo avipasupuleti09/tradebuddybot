@@ -6,21 +6,55 @@ async function request(path, options = {}) {
   try {
     return await fetch(`${API_BASE}${path}`, options);
   } catch {
-    throw new Error("Cannot reach backend API. Run from project root using: npm run dev");
+    throw new Error("Cannot reach the FYERS backend API. Ensure the backend is running on port 5000.");
   }
 }
 
 async function parse(response) {
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data.message || "Request failed");
+  const contentType = response.headers.get("content-type") || "";
+  const raw = await response.text();
+  let data = null;
+
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = null;
+    }
   }
-  return data;
+
+  if (!response.ok) {
+    if (data?.message) {
+      throw new Error(data.message);
+    }
+    if (contentType.includes("text/html")) {
+      throw new Error(`FYERS backend returned HTML (${response.status}) instead of JSON. Ensure the Flask backend is running on port 5000.`);
+    }
+    throw new Error(raw || `Request failed (${response.status})`);
+  }
+
+  if (data !== null) {
+    return data;
+  }
+
+  if (!raw) {
+    return {};
+  }
+
+  if (contentType.includes("text/html")) {
+    throw new Error("FYERS backend returned HTML instead of JSON. Ensure the Flask backend is running on port 5000.");
+  }
+
+  throw new Error("Received an invalid response from the FYERS backend.");
 }
 
-export async function login() {
+export async function login(pin) {
   const response = await request(`/api/login`, {
     method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ pin }),
   });
 
   const data = await response.json();
@@ -97,6 +131,15 @@ export async function fetchNseSymbolAnalytics(symbols) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ symbols }),
+  });
+  return parse(response);
+}
+
+export async function fetchDirectScreener(symbols, limit = 350) {
+  const response = await request(`/api/screener/direct`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ symbols, limit }),
   });
   return parse(response);
 }

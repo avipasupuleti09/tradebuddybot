@@ -31,15 +31,23 @@ class AuthResult:
         return asdict(self)
 
 
+class MissingBrokerPinError(RuntimeError):
+    pass
+
+
+class PinVerificationError(RuntimeError):
+    pass
+
+
 class FyersAuthService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.session = requests.Session()
 
-    def login_with_totp(self) -> AuthResult:
+    def login_with_totp(self, pin: str | None = None) -> AuthResult:
         request_key = self._send_login_otp()
         request_key = self._verify_totp(request_key)
-        pin_token = self._verify_pin(request_key)
+        pin_token = self._verify_pin(request_key, pin)
         auth_code = self._get_auth_code(pin_token)
         token_response = self._exchange_auth_code(auth_code)
 
@@ -101,10 +109,14 @@ class FyersAuthService:
             raise RuntimeError(f"Failed to verify TOTP: {data}")
         return next_request_key
 
-    def _verify_pin(self, request_key: str) -> str:
+    def _verify_pin(self, request_key: str, pin: str | None = None) -> str:
+        broker_pin = str(pin or self.settings.pin or "").strip()
+        if not broker_pin:
+            raise MissingBrokerPinError("Enter your broker account PIN to continue.")
+
         pin_candidates = [
-            self.settings.pin,
-            base64.b64encode(self.settings.pin.encode("ascii")).decode("ascii"),
+            broker_pin,
+            base64.b64encode(broker_pin.encode("ascii")).decode("ascii"),
         ]
         last_error: Exception | None = None
 
@@ -125,8 +137,8 @@ class FyersAuthService:
                 return token
 
         if last_error:
-            raise RuntimeError(f"Failed to verify PIN with available payload formats: {last_error}") from last_error
-        raise RuntimeError("Failed to verify PIN: no valid access_token returned.")
+            raise PinVerificationError("Broker PIN verification failed. Please check the PIN and try again.") from last_error
+        raise PinVerificationError("Broker PIN verification failed. Please check the PIN and try again.")
 
     def _get_auth_code(self, pin_token: str) -> str:
         app_id = self.settings.client_id.split("-")[0]

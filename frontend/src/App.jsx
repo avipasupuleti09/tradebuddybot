@@ -1,6 +1,7 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { API_BASE, fetchDashboard, fetchPnlHistory, fetchQuotes, fetchSession, fetchAllNseSymbols, fetchNseSymbolAnalytics, login, logout, placeOrder, runStrategy } from "./api";
+import { NSE_STOCK_GROUP_OPTIONS, filterSymbolsByNseGroup, getNseGroupOption } from "./nseGroups";
 
 const MarketsPage = lazy(() => import("./pages/MarketsPage"));
 const ScannerLayout = lazy(() => import("./pages/scanner/ScannerLayout"));
@@ -8,6 +9,7 @@ const ScannerCommandDeck = lazy(() => import("./components/scanner/ScannerComman
 const ScannerExecution = lazy(() => import("./components/scanner/ScannerExecution"));
 const ScannerDatasets = lazy(() => import("./components/scanner/ScannerDatasets"));
 const ScannerVisuals = lazy(() => import("./components/scanner/ScannerVisuals"));
+const DashboardMarketWorkbench = lazy(() => import("./components/dashboard/DashboardMarketWorkbench"));
 const ScannerFilterLab = lazy(() => import("./ScannerFilterLab"));
 
 
@@ -40,6 +42,8 @@ import {
 
 const SETTINGS_KEY = "tradebuddy-ui-settings";
 const AUTO_CAP_KEY = "tradebuddy-auto-cap";
+const APP_LOGIN_KEY = "tradebuddy-app-login";
+const PENDING_LOGIN_KEY = "tradebuddy-login-pending";
 const HOME_MARKET_SYMBOLS = [
   "NSE:NIFTY50-INDEX",
   "BSE:SENSEX-INDEX",
@@ -1294,8 +1298,27 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
   const [analyticsBySymbol, setAnalyticsBySymbol] = useState({});
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState("");
+  const [groupMenuOpen, setGroupMenuOpen] = useState(false);
+  const [groupQuery, setGroupQuery] = useState("");
+  const [activeGroupId, setActiveGroupId] = useState("all");
+  const groupMenuRef = useRef(null);
+
+  const activeGroup = useMemo(() => getNseGroupOption(activeGroupId), [activeGroupId]);
+  const groupFilteredSymbols = useMemo(
+    () => filterSymbolsByNseGroup(nseSymbols, activeGroupId),
+    [nseSymbols, activeGroupId],
+  );
+
+  const visibleGroups = useMemo(() => {
+    const query = groupQuery.trim().toUpperCase();
+    if (!query) {
+      return NSE_STOCK_GROUP_OPTIONS;
+    }
+    return NSE_STOCK_GROUP_OPTIONS.filter((item) => item.name.toUpperCase().includes(query));
+  }, [groupQuery]);
+
   const filtered = nseFilter
-    ? nseSymbols.filter((s) => {
+    ? groupFilteredSymbols.filter((s) => {
         const q = nseFilter.toUpperCase();
         return (
           (s.short || "").toUpperCase().includes(q) ||
@@ -1303,7 +1326,22 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
           (s.symbol || "").toUpperCase().includes(q)
         );
       })
-    : nseSymbols;
+    : groupFilteredSymbols;
+
+  useEffect(() => {
+    function handleOutsideClick(event) {
+      if (groupMenuRef.current && !groupMenuRef.current.contains(event.target)) {
+        setGroupMenuOpen(false);
+      }
+    }
+
+    if (!groupMenuOpen) {
+      return undefined;
+    }
+
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [groupMenuOpen]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const safePage = Math.min(nsePage, totalPages - 1);
@@ -1343,27 +1381,69 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
   }, [pageSymbolsKey]);
 
   return (
-    <div className="table-panel">
-      <div className="table-panel-head">
+    <div className="table-panel nse-table-panel">
+      <div className="table-panel-head nse-table-panel-head">
         <div>
           <h3>All NSE Listed Stocks</h3>
-          <p>{nseSymbols.length.toLocaleString()} stocks &middot; Showing {filtered.length.toLocaleString()} match{filtered.length !== 1 ? "es" : ""} &middot; Signal uses up to 8Y daily history for visible rows</p>
+          <p className="nse-stock-count">{filtered.length.toLocaleString()} stocks</p>
           {analyticsError ? <p className="nse-table-status error-text">{analyticsError}</p> : null}
           {!analyticsError && analyticsLoading ? <p className="nse-table-status">Loading OHLC + signal analytics for this page...</p> : null}
         </div>
-        <input
-          className="nse-search-input"
-          type="text"
-          placeholder="Search by name, symbol..."
-          value={nseFilter}
-          onChange={(e) => { setNseFilter(e.target.value); setNsePage(0); }}
-        />
+        <div className="nse-toolbar-controls">
+          <div className="nse-group-filter" ref={groupMenuRef}>
+            <button
+              type="button"
+              className={`nse-group-trigger${groupMenuOpen ? " open" : ""}`}
+              onClick={() => setGroupMenuOpen((current) => !current)}
+            >
+              <span className="nse-group-trigger-label">{activeGroup.name}</span>
+              <span className="nse-group-trigger-caret">⌃</span>
+            </button>
+            {groupMenuOpen ? (
+              <div className="nse-group-menu">
+                <input
+                  className="nse-group-menu-search"
+                  type="text"
+                  placeholder="search"
+                  value={groupQuery}
+                  onChange={(e) => setGroupQuery(e.target.value)}
+                />
+                <div className="nse-group-menu-list">
+                  {visibleGroups.map((group) => (
+                    <button
+                      key={group.id}
+                      type="button"
+                      className={`nse-group-option${group.id === activeGroupId ? " active" : ""}`}
+                      onClick={() => {
+                        setActiveGroupId(group.id);
+                        setGroupMenuOpen(false);
+                        setGroupQuery("");
+                        setNsePage(0);
+                      }}
+                    >
+                      <span>{group.name}</span>
+                      {group.count ? <span className="nse-group-count">{group.count}</span> : null}
+                    </button>
+                  ))}
+                  {!visibleGroups.length ? <div className="nse-group-empty">No groups found.</div> : null}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <input
+            className="nse-search-input"
+            type="text"
+            placeholder="Search by name, symbol..."
+            value={nseFilter}
+            onChange={(e) => { setNseFilter(e.target.value); setNsePage(0); }}
+          />
+        </div>
       </div>
       <div className="nse-stocks-scroll">
         <table className="nse-stocks-table">
           <thead>
             <tr>
-              <th>#</th>
+              <th className="nse-index-col">#</th>
               <th>Company Name</th>
               <th className="numeric">LTP</th>
               <th className="numeric">Today Open</th>
@@ -1371,7 +1451,7 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
               <th className="numeric">Today Low</th>
               <th className="numeric">Prev Open</th>
               <th className="numeric">Prev Close</th>
-              <th>Signal</th>
+              <th className="nse-signal-col">Signal</th>
               <th>Signal Reason</th>
             </tr>
           </thead>
@@ -1382,7 +1462,7 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
               const yesterday = analytics.yesterday || {};
               return (
                 <tr key={s.symbol || i}>
-                  <td>{safePage * pageSize + i + 1}</td>
+                  <td className="nse-index-col">{safePage * pageSize + i + 1}</td>
                   <td>{s.name}</td>
                   <td className="numeric nse-ltp-cell">{formatPriceCell(today.ltp)}</td>
                   <td className="numeric">{formatPriceCell(today.open)}</td>
@@ -1390,7 +1470,7 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
                   <td className="numeric">{formatPriceCell(today.low)}</td>
                   <td className="numeric">{formatPriceCell(yesterday.open)}</td>
                   <td className="numeric">{formatPriceCell(yesterday.close)}</td>
-                  <td>
+                  <td className="nse-signal-col">
                     <span className={`nse-signal-chip ${nseSignalClass(analytics.signal)}`} title={analytics.signalNote || "Signal pending"}>
                       {analytics.signal || (analyticsLoading ? "Loading..." : "Skip")}
                     </span>
@@ -1433,6 +1513,16 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [authenticating, setAuthenticating] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
+  const [accessGranted, setAccessGranted] = useState(() => {
+    try {
+      return window.sessionStorage.getItem(APP_LOGIN_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [brokerPin, setBrokerPin] = useState("");
+  const [showBrokerPin, setShowBrokerPin] = useState(false);
+  const [loginDebugMessages, setLoginDebugMessages] = useState([]);
   const [error, setError] = useState("");
   const [dashboard, setDashboard] = useState(null);
   const [watchlist, setWatchlist] = useState([]);
@@ -1498,13 +1588,72 @@ export default function App() {
     setThemeMode((current) => (current === "dark" ? "light" : "dark"));
   }
 
+  function grantAppAccess() {
+    setAccessGranted(true);
+    try {
+      window.sessionStorage.setItem(APP_LOGIN_KEY, "1");
+    } catch {
+      // noop
+    }
+  }
+
+  function revokeAppAccess() {
+    setAccessGranted(false);
+    try {
+      window.sessionStorage.removeItem(APP_LOGIN_KEY);
+      window.sessionStorage.removeItem(PENDING_LOGIN_KEY);
+    } catch {
+      // noop
+    }
+  }
+
+  function markPendingLogin() {
+    try {
+      window.sessionStorage.setItem(PENDING_LOGIN_KEY, "1");
+    } catch {
+      // noop
+    }
+  }
+
+  function clearPendingLogin() {
+    try {
+      window.sessionStorage.removeItem(PENDING_LOGIN_KEY);
+    } catch {
+      // noop
+    }
+  }
+
   useEffect(() => {
     const loginResult = search.get("login");
     if (loginResult === "error") {
       setError(search.get("reason") || "Login failed");
+      clearPendingLogin();
+      revokeAppAccess();
+      setLoading(false);
+      return;
     }
 
-    initialize();
+    let hasStoredAccess = false;
+    let hasPendingLogin = false;
+    try {
+      hasStoredAccess = window.sessionStorage.getItem(APP_LOGIN_KEY) === "1";
+      hasPendingLogin = window.sessionStorage.getItem(PENDING_LOGIN_KEY) === "1";
+    } catch {
+      // noop
+    }
+
+    if (loginResult === "success" && hasPendingLogin) {
+      clearPendingLogin();
+      void initialize({ debugAuth: true, activateAccess: true });
+      return;
+    }
+
+    if (hasStoredAccess) {
+      void initialize({ activateAccess: true });
+      return;
+    }
+
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -1547,6 +1696,11 @@ export default function App() {
       setDailyAutoState({ date: getTodayKey(), count: 0 });
     }
   }, [dailyAutoState]);
+
+  function pushLoginDebug(message) {
+    const timestamp = new Date().toLocaleTimeString([], { hour12: false });
+    setLoginDebugMessages((current) => [...current.slice(-7), `${timestamp}  ${message}`]);
+  }
 
   useEffect(() => {
     if (!authenticated) {
@@ -1742,12 +1896,19 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [authenticated, strategyAutoEnabled, strategyForm, settings.strategyAutoInterval, settings.strategyAutoMaxRuns, settings.strategyDailyCap, dailyAutoState.count]);
 
-  async function initialize() {
+  async function initialize(options = {}) {
+    const { debugAuth = false, activateAccess = false } = options;
     try {
       setLoading(true);
       setError("");
+      if (debugAuth) {
+        pushLoginDebug("Checking /api/session...");
+      }
       const session = await fetchSession();
       setAuthenticated(Boolean(session.authenticated));
+      if (debugAuth) {
+        pushLoginDebug(`Session response: authenticated=${Boolean(session.authenticated)}${session.warning ? `, warning=${session.warning}` : ""}${session.message ? `, message=${session.message}` : ""}`);
+      }
       if (!session.authenticated && session.message) {
         setError(session.message);
       }
@@ -1755,17 +1916,41 @@ export default function App() {
         setError(session.warning);
       }
       if (session.authenticated) {
+        if (activateAccess) {
+          grantAppAccess();
+        }
+        setBrokerPin("");
+        setShowBrokerPin(false);
+        if (debugAuth) {
+          pushLoginDebug("Loading /api/dashboard...");
+        }
         const data = await fetchDashboard();
         setDashboard(data);
+        if (debugAuth) {
+          pushLoginDebug("Dashboard loaded successfully.");
+        }
         if (data?.profile?.s === "error" && data?.profile?.message) {
           setError(data.profile.message);
         }
+        return true;
+      }
+
+      if (activateAccess) {
+        revokeAppAccess();
       }
     } catch (err) {
+      if (debugAuth) {
+        pushLoginDebug(`Initialize failed: ${err.message}`);
+      }
+      if (activateAccess) {
+        revokeAppAccess();
+      }
       setError(err.message);
     } finally {
       setLoading(false);
     }
+
+    return false;
   }
 
   async function refreshDashboard(silent = false) {
@@ -1788,19 +1973,42 @@ export default function App() {
   }
 
   async function handleLogin() {
+    const normalizedPin = brokerPin.trim();
+    setLoginDebugMessages([]);
+    pushLoginDebug(`PIN digits captured: ${normalizedPin.length}/4`);
+    if (normalizedPin.length !== 4) {
+      setError("Enter your 4-digit broker account PIN to continue.");
+      pushLoginDebug("Client validation blocked login: PIN must be exactly 4 digits.");
+      return;
+    }
+
     setError("");
     setAuthenticating(true);
+    pushLoginDebug("Submitting POST /api/login...");
     try {
-      const result = await login();
+      const result = await login(normalizedPin);
       if (result?.redirected) {
+        markPendingLogin();
+        pushLoginDebug("Backend requested browser redirect to FYERS auth page.");
         return;
       }
-      await initialize();
+      pushLoginDebug(`Login API returned status=${result?.status || "ok"}, mode=${result?.mode || "unknown"}.`);
+      const initialized = await initialize({ debugAuth: true, activateAccess: true });
+      if (!initialized) {
+        pushLoginDebug("Login API succeeded, but session did not become authenticated.");
+      }
     } catch (err) {
+      clearPendingLogin();
+      pushLoginDebug(`Login request failed: ${err.message}`);
       setError(err.message);
     } finally {
       setAuthenticating(false);
     }
+  }
+
+  function handleBrokerPinChange(event) {
+    const nextValue = event.target.value.replace(/\D/g, "").slice(0, 4);
+    setBrokerPin(nextValue);
   }
 
   function handleOrderChange(event) {
@@ -1907,6 +2115,7 @@ export default function App() {
     try {
       await logout();
       setAuthenticated(false);
+      revokeAppAccess();
       setDashboard(null);
       setWatchlist([]);
       setOrderResult("");
@@ -1942,21 +2151,73 @@ export default function App() {
     );
   }
 
-  if (!authenticated) {
+  if (!accessGranted) {
     return (
       <div className="login-fullpage">
         <div className="login-card">
           <div className="login-brand-icon">TB</div>
           <h1>TradeBuddy</h1>
           <p>Securely access your FYERS portfolio home page.</p>
-          <button
-            className="btn-primary"
-            style={{ width: "100%", justifyContent: "center", padding: "14px", marginTop: 4 }}
-            onClick={handleLogin}
-            disabled={authenticating}
+          <form
+            className="login-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleLogin();
+            }}
           >
-            {authenticating ? "Connecting…" : "Login with FYERS"}
-          </button>
+            <label className="login-field" htmlFor="broker-pin">
+              <span>Broker account PIN</span>
+              <div className="login-pin-wrap">
+                <input
+                  id="broker-pin"
+                  className="login-input"
+                  type={showBrokerPin ? "text" : "password"}
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder="Enter your 4-digit broker PIN"
+                  value={brokerPin}
+                  onChange={handleBrokerPinChange}
+                  maxLength={4}
+                />
+                <button
+                  type="button"
+                  className="login-pin-toggle"
+                  onClick={() => setShowBrokerPin((current) => !current)}
+                >
+                  {showBrokerPin ? "Hide" : "Show"}
+                </button>
+              </div>
+            </label>
+
+            <p className="login-help-text">
+              Your broker PIN is used only for this FYERS authentication request and is not stored by the app.
+            </p>
+
+            <div className="login-debug-panel">
+              <div className="login-debug-head">
+                <strong>Auth debug</strong>
+                <span>{`PIN digits: ${brokerPin.trim().length}/4`}</span>
+              </div>
+              <div className="login-debug-list">
+                {loginDebugMessages.length ? (
+                  loginDebugMessages.map((message, index) => (
+                    <div key={`${message}-${index}`} className="login-debug-item">{message}</div>
+                  ))
+                ) : (
+                  <div className="login-debug-item login-debug-item-muted">Waiting for login attempt.</div>
+                )}
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              className="btn-primary"
+              style={{ width: "100%", justifyContent: "center", padding: "14px", marginTop: 4 }}
+              disabled={authenticating || brokerPin.trim().length !== 4}
+            >
+              {authenticating ? "Authenticating PIN…" : "Login with FYERS"}
+            </button>
+          </form>
           {error ? <p className="error-text" style={{ marginTop: 14 }}>{error}</p> : null}
         </div>
       </div>
@@ -2108,14 +2369,17 @@ export default function App() {
                   })}
                 </div>
 
-                {/* NSE Listed Stocks */}
-                <NseStocksTable
-                  nseSymbols={nseSymbols}
-                  nseFilter={nseFilter}
-                  setNseFilter={setNseFilter}
-                  nsePage={nsePage}
-                  setNsePage={setNsePage}
-                  pageSize={NSE_PAGE_SIZE}
+                <DashboardMarketWorkbench
+                  allStocksContent={(
+                    <NseStocksTable
+                      nseSymbols={nseSymbols}
+                      nseFilter={nseFilter}
+                      setNseFilter={setNseFilter}
+                      nsePage={nsePage}
+                      setNsePage={setNsePage}
+                      pageSize={NSE_PAGE_SIZE}
+                    />
+                  )}
                 />
               </>
             )}

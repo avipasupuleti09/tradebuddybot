@@ -17,7 +17,7 @@ class Settings:
     redirect_uri: str
     user_id: str
     totp_key: str
-    pin: str
+    pin: str | None
     token_file: Path
     order_static_ip: str
     enforce_static_ip_check: bool
@@ -33,7 +33,7 @@ class Settings:
             redirect_uri=_required("FYERS_REDIRECT_URI"),
             user_id=_required("FYERS_USER_ID"),
             totp_key=_required("FYERS_TOTP_KEY"),
-            pin=_required("FYERS_PIN"),
+            pin=_optional("FYERS_PIN"),
             token_file=token_file,
             order_static_ip=os.getenv("FYERS_ORDER_STATIC_IP", "").strip(),
             enforce_static_ip_check=_as_bool(os.getenv("FYERS_ENFORCE_STATIC_IP_CHECK", "true")),
@@ -48,6 +48,11 @@ def _required(name: str) -> str:
     if not value:
         raise ValueError(f"Missing required environment variable: {name}")
     return value
+
+
+def _optional(name: str) -> str | None:
+    value = os.getenv(name, "").strip()
+    return value or None
 
 
 def _as_bool(raw: str) -> bool:

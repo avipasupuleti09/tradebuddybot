@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from bisect import bisect_left
 import json
 import os
 from threading import Lock
@@ -15,7 +16,7 @@ from flask_sock import Sock
 from dotenv import dotenv_values
 
 from .api import FyersApiService
-from .auth import FyersAuthService
+from .auth import FyersAuthService, MissingBrokerPinError, PinVerificationError
 from .config import Settings
 from .network import ensure_static_ip
 from .symbols import SymbolMaster
@@ -50,9 +51,136 @@ def create_app() -> Flask:
     history_signal_cache_lock = Lock()
 
     _MAX_ANALYTICS_SYMBOLS = 50
+    _MAX_DIRECT_SCREENER_SYMBOLS = 350
     _ANALYTICS_HISTORY_YEARS = 8
     _ANALYTICS_CHUNK_DAYS = 1500
     _ANALYTICS_CACHE_TTL_SECONDS = 6 * 60 * 60
+    _DIRECT_DAILY_HISTORY_DAYS = 1095
+    _DIRECT_INTRADAY_HISTORY_DAYS = 60
+    _DIRECT_INTRADAY_RESOLUTION = "5"
+    _DIRECT_LOOKBACK_52W = 252
+    _DIRECT_NEAR_PCT_52W = 0.25
+    _DIRECT_MA50 = 50
+    _DIRECT_MA200 = 200
+    _DIRECT_VOL_SPIKE_MULT = 1.5
+    _DIRECT_VOL_BREAKOUT_MULT = 2.0
+    _DIRECT_GAP_UP_PCT = 2.0
+    _DIRECT_ATR_PERIOD = 14
+    _DIRECT_ATR_STOP_MULT = 2.0
+    _DIRECT_RISK_PER_TRADE_INR = 1000
+    _DIRECT_SR_LOOKBACK_DAYS = 60
+    _DIRECT_CMF_PERIOD = 20
+    _DIRECT_OBV_SLOPE_DAYS = 20
+    _DIRECT_ACCUM_SCORE_MIN = 60
+    _DIRECT_AI_PROB_MIN = 0.55
+    _DIRECT_BENCHMARK_SYMBOL = "NSE:NIFTY50-INDEX"
+
+    direct_sector_map = {
+        "RELIANCE": "Oil & Gas",
+        "TCS": "Information Technology",
+        "INFY": "Information Technology",
+        "HDFCBANK": "Financial Services",
+        "ICICIBANK": "Financial Services",
+        "SBIN": "Financial Services",
+        "KOTAKBANK": "Financial Services",
+        "AXISBANK": "Financial Services",
+        "BAJFINANCE": "Financial Services",
+        "BAJAJFINSV": "Financial Services",
+        "HCLTECH": "Information Technology",
+        "WIPRO": "Information Technology",
+        "TECHM": "Information Technology",
+        "LTIMINDTREE": "Information Technology",
+        "LTIM": "Information Technology",
+        "ITC": "FMCG",
+        "HINDUNILVR": "FMCG",
+        "NESTLEIND": "FMCG",
+        "BRITANNIA": "FMCG",
+        "DABUR": "FMCG",
+        "MARICO": "FMCG",
+        "COLPAL": "FMCG",
+        "GODREJCP": "FMCG",
+        "TATACONSUM": "FMCG",
+        "BHARTIARTL": "Telecommunication",
+        "JIOFIN": "Financial Services",
+        "MARUTI": "Automobile",
+        "TATAMOTORS": "Automobile",
+        "M&M": "Automobile",
+        "BAJAJ-AUTO": "Automobile",
+        "HEROMOTOCO": "Automobile",
+        "EICHERMOT": "Automobile",
+        "ASHOKLEY": "Automobile",
+        "SUNPHARMA": "Healthcare",
+        "DRREDDY": "Healthcare",
+        "CIPLA": "Healthcare",
+        "DIVISLAB": "Healthcare",
+        "APOLLOHOSP": "Healthcare",
+        "BIOCON": "Healthcare",
+        "LUPIN": "Healthcare",
+        "LT": "Construction",
+        "ADANIENT": "Metals & Mining",
+        "ADANIPORTS": "Services",
+        "ADANIGREEN": "Power",
+        "ADANIPOWER": "Power",
+        "NTPC": "Power",
+        "POWERGRID": "Power",
+        "TATAPOWER": "Power",
+        "TATASTEEL": "Metals & Mining",
+        "JSWSTEEL": "Metals & Mining",
+        "HINDALCO": "Metals & Mining",
+        "COALINDIA": "Metals & Mining",
+        "VEDL": "Metals & Mining",
+        "NMDC": "Metals & Mining",
+        "ULTRACEMCO": "Construction",
+        "SHREECEM": "Construction",
+        "AMBUJACEM": "Construction",
+        "ACC": "Construction",
+        "GRASIM": "Construction",
+        "TITAN": "Consumer Durables",
+        "ASIANPAINT": "Consumer Durables",
+        "BERGEPAINT": "Consumer Durables",
+        "PIDILITIND": "Chemicals",
+        "UPL": "Chemicals",
+        "SRF": "Chemicals",
+        "BPCL": "Oil & Gas",
+        "ONGC": "Oil & Gas",
+        "IOC": "Oil & Gas",
+        "HINDPETRO": "Oil & Gas",
+        "GAIL": "Oil & Gas",
+        "INDUSINDBK": "Financial Services",
+        "BANKBARODA": "Financial Services",
+        "PNB": "Financial Services",
+        "IDFCFIRSTB": "Financial Services",
+        "FEDERALBNK": "Financial Services",
+        "CANBK": "Financial Services",
+        "HDFCLIFE": "Financial Services",
+        "SBILIFE": "Financial Services",
+        "ICICIPRULI": "Financial Services",
+        "ICICIGI": "Financial Services",
+        "SBICARD": "Financial Services",
+        "HAVELLS": "Consumer Durables",
+        "VOLTAS": "Consumer Durables",
+        "WHIRLPOOL": "Consumer Durables",
+        "ZOMATO": "Services",
+        "NYKAA": "Services",
+        "PAYTM": "Financial Services",
+        "POLICYBZR": "Financial Services",
+        "DMART": "FMCG",
+        "TRENT": "FMCG",
+        "PERSISTENT": "Information Technology",
+        "COFORGE": "Information Technology",
+        "MPHASIS": "Information Technology",
+        "HAPPSTMNDS": "Information Technology",
+        "LTTS": "Information Technology",
+        "HAL": "Capital Goods",
+        "BEL": "Capital Goods",
+        "BHEL": "Capital Goods",
+        "IRCTC": "Services",
+        "INDIANHOTEL": "Services",
+        "LEMONTREE": "Services",
+        "SIEMENS": "Capital Goods",
+        "ABB": "Capital Goods",
+        "CUMMINSIND": "Capital Goods",
+    }
 
     def resolve_frontend_url() -> str:
         if frontend_url:
@@ -103,6 +231,52 @@ def create_app() -> Flask:
         if current is None or previous in (None, 0):
             return None
         return ((current - previous) / previous) * 100
+
+    def safe_round(value: float | None, digits: int = 2) -> float | None:
+        number = as_float(value)
+        if number is None:
+            return None
+        return round(number, digits)
+
+    def mean(values: list[float | None]) -> float | None:
+        valid = [value for value in values if value is not None]
+        if not valid:
+            return None
+        return sum(valid) / len(valid)
+
+    def min_max_normalize(value: float | None, minimum: float, maximum: float) -> float | None:
+        number = as_float(value)
+        if number is None:
+            return None
+        if maximum == minimum:
+            return 0.5
+        normalized = (number - minimum) / (maximum - minimum)
+        if normalized < 0:
+            return 0.0
+        if normalized > 1:
+            return 1.0
+        return normalized
+
+    def linear_slope(values: list[float | None]) -> float | None:
+        numeric = [value for value in values if value is not None]
+        if len(numeric) < 2:
+            return None
+        size = len(numeric)
+        x_mean = (size - 1) / 2
+        y_mean = sum(numeric) / size
+        denominator = sum((index - x_mean) ** 2 for index in range(size))
+        if denominator == 0:
+            return None
+        numerator = sum((index - x_mean) * (numeric[index] - y_mean) for index in range(size))
+        return numerator / denominator
+
+    def rolling_mean(values: list[float | None], period: int) -> float | None:
+        if len(values) < period:
+            return None
+        slice_values = [value for value in values[-period:] if value is not None]
+        if len(slice_values) < period:
+            return None
+        return sum(slice_values) / period
 
     def compute_rsi(values: list[float], period: int = 14) -> float | None:
         if len(values) <= period:
@@ -169,11 +343,22 @@ def create_app() -> Flask:
 
     @app.post("/api/login")
     def login() -> tuple[dict, int]:
+        payload = request.get_json(silent=True) or {}
+        broker_pin = str(payload.get("pin", "")).strip() or None
+        if not broker_pin:
+            return {"status": "error", "message": "Enter your 4-digit broker account PIN to continue."}, 400
+        if not broker_pin.isdigit() or len(broker_pin) != 4:
+            return {"status": "error", "message": "Broker PIN must be exactly 4 digits."}, 400
+
         auth_service = FyersAuthService(settings)
         try:
-            result = auth_service.login_with_totp()
+            result = auth_service.login_with_totp(broker_pin)
             TokenStore(settings.token_file).save(result.to_dict())
             return {"status": "ok", "mode": "totp"}, 200
+        except PinVerificationError as exc:
+            return {"status": "error", "message": str(exc)}, 401
+        except MissingBrokerPinError as exc:
+            return {"status": "error", "message": str(exc)}, 400
         except Exception as exc:
             auth_url = auth_service.get_manual_auth_url()
             return {
@@ -607,6 +792,406 @@ def create_app() -> Flask:
         deduped = {int(candle[0]): candle for candle in all_candles if isinstance(candle, list) and len(candle) >= 5}
         return [deduped[key] for key in sorted(deduped)]
 
+    def _history_rows(symbol: str, resolution: str, days: int) -> list[dict]:
+        api = load_api()
+        end_date = date.today()
+        start_date = end_date - timedelta(days=max(days, 1))
+        is_daily = resolution == "D"
+        all_candles: list[list] = []
+
+        if is_daily and days > _CHUNK_DAYS:
+            chunk_end = end_date
+            while chunk_end > start_date:
+                chunk_start = max(start_date, chunk_end - timedelta(days=_CHUNK_DAYS))
+                data = api.history(symbol, resolution, chunk_start, chunk_end)
+                all_candles.extend(data.get("candles") or [])
+                chunk_end = chunk_start - timedelta(days=1)
+        else:
+            data = api.history(symbol, resolution, start_date, end_date)
+            all_candles = data.get("candles") or []
+
+        deduped: dict[int, list] = {}
+        for candle in all_candles:
+            if isinstance(candle, list) and len(candle) >= 6:
+                deduped[int(candle[0])] = candle
+
+        rows: list[dict] = []
+        for key in sorted(deduped):
+            candle = deduped[key]
+            rows.append({
+                "symbol": _normalize_symbol(symbol),
+                "open": as_float(candle[1]),
+                "high": as_float(candle[2]),
+                "low": as_float(candle[3]),
+                "close": as_float(candle[4]),
+                "volume": as_float(candle[5]),
+                "date": datetime.utcfromtimestamp(key).isoformat() + "Z",
+            })
+        return [row for row in rows if row.get("close") is not None]
+
+    def _calculate_atr(rows: list[dict], period: int = _DIRECT_ATR_PERIOD) -> float | None:
+        if len(rows) < period + 1:
+            return None
+        true_ranges: list[float] = []
+        for index in range(len(rows) - period, len(rows)):
+            row = rows[index]
+            prev_close = as_float(rows[index - 1].get("close"))
+            high = as_float(row.get("high"))
+            low = as_float(row.get("low"))
+            if high is None or low is None or prev_close is None:
+                continue
+            true_ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+        return mean(true_ranges)
+
+    def _calculate_cmf(rows: list[dict], period: int = _DIRECT_CMF_PERIOD) -> float | None:
+        if len(rows) < period:
+            return None
+        money_flow_volume = 0.0
+        volume_total = 0.0
+        for row in rows[-period:]:
+            high = as_float(row.get("high"))
+            low = as_float(row.get("low"))
+            close = as_float(row.get("close"))
+            volume = as_float(row.get("volume"))
+            if None in (high, low, close, volume):
+                continue
+            spread = high - low
+            if spread == 0:
+                continue
+            money_flow_multiplier = ((close - low) - (high - close)) / spread
+            money_flow_volume += money_flow_multiplier * volume
+            volume_total += volume
+        if volume_total == 0:
+            return None
+        return money_flow_volume / volume_total
+
+    def _calculate_obv_slope(rows: list[dict], period: int = _DIRECT_OBV_SLOPE_DAYS) -> float | None:
+        if len(rows) < period + 1:
+            return None
+        obv = 0.0
+        values: list[float] = []
+        for index in range(len(rows) - period, len(rows)):
+            prev_close = as_float(rows[index - 1].get("close"))
+            current_close = as_float(rows[index].get("close"))
+            volume = as_float(rows[index].get("volume")) or 0.0
+            if prev_close is None or current_close is None:
+                continue
+            if current_close > prev_close:
+                obv += volume
+            elif current_close < prev_close:
+                obv -= volume
+            values.append(obv)
+        return linear_slope(values)
+
+    def _compute_support_resistance(rows: list[dict], lookback_days: int = _DIRECT_SR_LOOKBACK_DAYS) -> tuple[float | None, float | None]:
+        slice_rows = rows[-lookback_days:]
+        if not slice_rows:
+            return None, None
+        lows = [as_float(row.get("low")) for row in slice_rows if as_float(row.get("low")) is not None]
+        highs = [as_float(row.get("high")) for row in slice_rows if as_float(row.get("high")) is not None]
+        return (safe_round(min(lows), 2) if lows else None, safe_round(max(highs), 2) if highs else None)
+
+    def _classify_direct_signal(row: dict) -> str:
+        ai_pick = bool(row.get("AI_Pick"))
+        accumulation = bool(row.get("Accumulation"))
+        vol_breakout = bool(row.get("VolBreakout"))
+        above_200dma = bool(row.get("Above200DMA"))
+        day_change = as_float(row.get("DayChange_%"))
+        rs_rating = as_float(row.get("RS_rating_1_100"))
+
+        if ai_pick and accumulation and vol_breakout and above_200dma:
+            return "STRONG BUY"
+        if ai_pick and accumulation and above_200dma:
+            return "BUY"
+        if day_change is not None and day_change < 0 and rs_rating is not None and rs_rating < 40 and not accumulation and not above_200dma:
+            return "SELL"
+        if not ai_pick and not accumulation and not vol_breakout and day_change is not None and day_change < 0:
+            return "AVOID"
+        return "HOLD"
+
+    def _intraday_signal(rows: list[dict]) -> dict:
+        if not rows:
+            return {
+                "prob": None,
+                "momentum": None,
+                "ret1": None,
+                "ret6": None,
+                "dayRet": None,
+                "vwapDist": None,
+                "timestamp": None,
+            }
+
+        closes = [as_float(row.get("close")) for row in rows if as_float(row.get("close")) is not None]
+        volumes = [as_float(row.get("volume")) for row in rows if as_float(row.get("volume")) is not None]
+        latest = rows[-1]
+        ret1 = percent_change(closes[-1], closes[-2]) if len(closes) > 1 else None
+        ret6 = percent_change(closes[-1], closes[-7]) if len(closes) > 6 else None
+        recent_volume_avg = mean(volumes[-5:]) if len(volumes) >= 5 else None
+        latest_volume = as_float(latest.get("volume"))
+        vol_ratio5 = latest_volume / recent_volume_avg if recent_volume_avg not in (None, 0) and latest_volume is not None else None
+        rsi14 = compute_rsi(closes, 14)
+        slope = linear_slope(closes[-12:]) if len(closes) >= 12 else None
+        session_open = as_float(rows[0].get("open"))
+        day_ret = percent_change(closes[-1], session_open) if closes and session_open not in (None, 0) else None
+
+        cumulative_tpv = 0.0
+        cumulative_volume = 0.0
+        for row in rows:
+            high = as_float(row.get("high"))
+            low = as_float(row.get("low"))
+            close = as_float(row.get("close"))
+            volume = as_float(row.get("volume"))
+            if None in (high, low, close, volume):
+                continue
+            cumulative_tpv += ((high + low + close) / 3) * volume
+            cumulative_volume += volume
+        vwap = cumulative_tpv / cumulative_volume if cumulative_volume else None
+        vwap_dist = percent_change(closes[-1], (vwap or 0) + 0.000001) if closes and vwap is not None else None
+
+        probability = mean([
+            min_max_normalize(ret1 or 0, -1.5, 1.5),
+            min_max_normalize(ret6 or 0, -3, 3),
+            min_max_normalize(day_ret or 0, -3, 3),
+            min_max_normalize(vwap_dist or 0, -2, 2),
+            min_max_normalize((vol_ratio5 or 1) - 1, 0, 2),
+            min_max_normalize((rsi14 or 50) - 50, -20, 20),
+            min_max_normalize(slope or 0, -2, 2),
+        ])
+        momentum = mean([
+            probability * 100 if probability is not None else None,
+            min_max_normalize(day_ret or 0, -3, 3) * 100,
+            min_max_normalize(vwap_dist or 0, -2, 2) * 100,
+        ])
+
+        return {
+            "prob": safe_round(probability, 4),
+            "momentum": safe_round(momentum, 2),
+            "ret1": safe_round(ret1, 3),
+            "ret6": safe_round(ret6, 3),
+            "dayRet": safe_round(day_ret, 3),
+            "vwapDist": safe_round(vwap_dist, 3),
+            "timestamp": latest.get("date"),
+        }
+
+    def _sector_name(symbol: str) -> str:
+        bare = str(symbol or "").replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").replace("-INDEX", "").upper()
+        if bare.endswith("INDEX") or "INDEX" in bare:
+            return "Index"
+        return direct_sector_map.get(bare, "Unknown")
+
+    def _build_direct_row(symbol: str, benchmark_rows: list[dict]) -> dict | None:
+        daily_rows = _history_rows(symbol, "D", _DIRECT_DAILY_HISTORY_DAYS)
+        if len(daily_rows) < 80:
+            return None
+
+        intraday_rows = _history_rows(symbol, _DIRECT_INTRADAY_RESOLUTION, _DIRECT_INTRADAY_HISTORY_DAYS)
+        intraday = _intraday_signal(intraday_rows)
+
+        closes = [as_float(row.get("close")) for row in daily_rows if as_float(row.get("close")) is not None]
+        volumes = [as_float(row.get("volume")) for row in daily_rows if as_float(row.get("volume")) is not None]
+        latest = daily_rows[-1]
+        previous = daily_rows[-2] if len(daily_rows) > 1 else None
+        current_price = as_float(latest.get("close"))
+        day_open = as_float(latest.get("open"))
+        prev_close = as_float(previous.get("close")) if previous else None
+        day_change_pct = percent_change(current_price, prev_close)
+        window_rows = daily_rows[-_DIRECT_LOOKBACK_52W:]
+        high52 = max(as_float(row.get("high")) for row in window_rows if as_float(row.get("high")) is not None)
+        low52 = min(as_float(row.get("low")) for row in window_rows if as_float(row.get("low")) is not None)
+        dist_high = ((high52 - current_price) / high52) * 100 if current_price is not None and high52 else None
+        dist_low = ((current_price - low52) / low52) * 100 if current_price is not None and low52 else None
+        near_high = dist_high is not None and dist_high <= _DIRECT_NEAR_PCT_52W
+        near_low = dist_low is not None and dist_low <= _DIRECT_NEAR_PCT_52W
+        avg20 = mean(volumes[-20:])
+        latest_volume = as_float(latest.get("volume"))
+        vol_ratio = latest_volume / avg20 if avg20 not in (None, 0) and latest_volume is not None else None
+        vol_spike = vol_ratio is not None and vol_ratio >= _DIRECT_VOL_SPIKE_MULT
+        vol_breakout = vol_ratio is not None and vol_ratio >= _DIRECT_VOL_BREAKOUT_MULT
+        ma50 = rolling_mean(closes, _DIRECT_MA50)
+        ma200 = rolling_mean(closes, _DIRECT_MA200)
+        above_200dma = current_price > ma200 if current_price is not None and ma200 is not None else None
+        high20 = max(as_float(row.get("high")) for row in daily_rows[-20:] if as_float(row.get("high")) is not None)
+        breakout20d = current_price is not None and current_price >= high20
+        gap_up_pct = percent_change(day_open, prev_close)
+        gap_up = gap_up_pct is not None and gap_up_pct >= _DIRECT_GAP_UP_PCT
+        sma5 = rolling_mean(closes, 5)
+        reversal_low = bool(near_low and sma5 is not None and current_price is not None and current_price > sma5)
+        atr = _calculate_atr(daily_rows, _DIRECT_ATR_PERIOD)
+        stop_loss = current_price - _DIRECT_ATR_STOP_MULT * atr if current_price is not None and atr is not None else None
+        risk_per_share = current_price - stop_loss if current_price is not None and stop_loss is not None else None
+        qty = int(_DIRECT_RISK_PER_TRADE_INR // risk_per_share) if risk_per_share not in (None, 0) and risk_per_share > 0 else None
+        support, resistance = _compute_support_resistance(daily_rows, _DIRECT_SR_LOOKBACK_DAYS)
+        cmf20 = _calculate_cmf(daily_rows, _DIRECT_CMF_PERIOD)
+        obv_slope = _calculate_obv_slope(daily_rows, _DIRECT_OBV_SLOPE_DAYS)
+        rsi14 = compute_rsi(closes, 14)
+        accum_score = mean([
+            (min_max_normalize(cmf20 or 0, -0.2, 0.2) or 0) * 100,
+            (min_max_normalize(obv_slope or 0, -1000000, 1000000) or 0) * 100,
+            (min_max_normalize(vol_ratio or 0, 0.5, 2.5) or 0) * 100,
+            (min_max_normalize(rsi14 or 50, 40, 80) or 0) * 100,
+        ])
+        accumulation = bool(accum_score is not None and accum_score >= _DIRECT_ACCUM_SCORE_MIN and above_200dma)
+        rs3 = None
+        rs6 = None
+        if len(benchmark_rows) > 63 and len(closes) > 63:
+            rs3 = percent_change(current_price, closes[-64])
+            benchmark_rs3 = percent_change(as_float(benchmark_rows[-1].get("close")), as_float(benchmark_rows[-64].get("close")))
+            if rs3 is not None and benchmark_rs3 is not None:
+                rs3 -= benchmark_rs3
+        if len(benchmark_rows) > 126 and len(closes) > 126:
+            rs6 = percent_change(current_price, closes[-127])
+            benchmark_rs6 = percent_change(as_float(benchmark_rows[-1].get("close")), as_float(benchmark_rows[-127].get("close")))
+            if rs6 is not None and benchmark_rs6 is not None:
+                rs6 -= benchmark_rs6
+        ai_prob = mean([
+            intraday.get("prob"),
+            min_max_normalize(vol_ratio or 0, 0.5, 2.5),
+            min_max_normalize(rsi14 or 50, 40, 80),
+            min_max_normalize(rs3 or 0, -10, 10),
+            min_max_normalize(rs6 or 0, -15, 15),
+            min_max_normalize(day_change_pct or 0, -5, 5),
+        ])
+        ai_pick = ai_prob is not None and ai_prob >= _DIRECT_AI_PROB_MIN
+        score = 0
+        if near_high:
+            score += 35
+        if breakout20d:
+            score += 20
+        if vol_spike:
+            score += 15
+        if above_200dma:
+            score += 10
+        if vol_breakout:
+            score += 10
+        if gap_up:
+            score += 5
+        if accumulation:
+            score += 5
+        if (intraday.get("momentum") or 0) > 60:
+            score += 10
+
+        row = {
+            "Ticker": _normalize_symbol(symbol),
+            "LastDate": str(latest.get("date") or "")[:10] or None,
+            "DayOpen": safe_round(day_open, 2),
+            "CurrentPrice": safe_round(current_price, 2),
+            "DayClosePrice": safe_round(current_price, 2),
+            "DayChange_%": safe_round(day_change_pct, 3),
+            "Sector": _sector_name(symbol),
+            "DeliveryPct": None,
+            "52W_High": safe_round(high52, 2),
+            "52W_Low": safe_round(low52, 2),
+            "DistFrom52WHigh_%": safe_round(dist_high, 4),
+            "DistFrom52WLow_%": safe_round(dist_low, 4),
+            "Volume": latest_volume,
+            "AvgVol20": safe_round(avg20, 0),
+            "VolRatio": safe_round(vol_ratio, 3),
+            "VolSpike": bool(vol_spike),
+            "VolBreakout": bool(vol_breakout),
+            "MA50": safe_round(ma50, 2),
+            "MA200": safe_round(ma200, 2),
+            "Above200DMA": above_200dma,
+            "GapUp": bool(gap_up),
+            "GapUp_%": safe_round(gap_up_pct, 3),
+            "Near52WHigh": bool(near_high),
+            "Near52WLow": bool(near_low),
+            "Breakout20D": bool(breakout20d),
+            "ReversalFromLow": bool(reversal_low),
+            "Support": support,
+            "Resistance": resistance,
+            "RS_3M_vs_NIFTY_%": safe_round(rs3, 3),
+            "RS_6M_vs_NIFTY_%": safe_round(rs6, 3),
+            "CMF20": safe_round(cmf20, 4),
+            "OBV_Slope20": safe_round(obv_slope, 2),
+            "RSI14": safe_round(rsi14, 2),
+            "AccumScore": safe_round(accum_score, 1),
+            "Accumulation": bool(accumulation),
+            "ATR14": safe_round(atr, 3),
+            "StopLoss_ATR": safe_round(stop_loss, 2),
+            "RiskPerShare": safe_round(risk_per_share, 2),
+            "Qty_for_Risk(INR)": qty,
+            "AI_Prob": safe_round(ai_prob, 4),
+            "AI_Pick": bool(ai_pick),
+            "Intraday_AI_Prob": intraday.get("prob"),
+            "IntradayMomentumScore": intraday.get("momentum"),
+            "IntradayRet_1Bar_%": intraday.get("ret1"),
+            "IntradayRet_6Bar_%": intraday.get("ret6"),
+            "DayRetFromOpen_%": intraday.get("dayRet"),
+            "VWAPDist_%": intraday.get("vwapDist"),
+            "IntradayTimestamp": intraday.get("timestamp"),
+            "Score": score,
+            "RS_rating_1_100": None,
+        }
+        row["Signal"] = _classify_direct_signal(row)
+        return row
+
+    def _add_direct_rs_rating(rows: list[dict]) -> list[dict]:
+        valid = sorted(
+            as_float(row.get("RS_3M_vs_NIFTY_%"))
+            for row in rows
+            if as_float(row.get("RS_3M_vs_NIFTY_%")) is not None
+        )
+        if not valid:
+            return rows
+
+        rated_rows: list[dict] = []
+        total = len(valid)
+        for row in rows:
+            value = as_float(row.get("RS_3M_vs_NIFTY_%"))
+            if value is None:
+                rated_rows.append({**row, "RS_rating_1_100": None})
+                continue
+            position = bisect_left(valid, value)
+            rating = round(((position + 1) / total) * 99 + 1)
+            rated_rows.append({**row, "RS_rating_1_100": rating})
+        return rated_rows
+
+    def _direct_live_row(row: dict) -> dict:
+        combined_ai = mean([as_float(row.get("Intraday_AI_Prob")), as_float(row.get("AI_Prob"))])
+        return {
+            "Ticker": row.get("Ticker"),
+            "Sector": row.get("Sector") or "Unknown",
+            "Signal": row.get("Signal") or "HOLD",
+            "Price": row.get("CurrentPrice"),
+            "Change_%": row.get("DayChange_%"),
+            "Gap_%": row.get("GapUp_%"),
+            "DayRetFromOpen_%": row.get("DayRetFromOpen_%"),
+            "VWAPDist_%": row.get("VWAPDist_%"),
+            "IntradayRet_1Bar_%": row.get("IntradayRet_1Bar_%"),
+            "IntradayRet_6Bar_%": row.get("IntradayRet_6Bar_%"),
+            "Intraday_AI_Prob": row.get("Intraday_AI_Prob"),
+            "AI_Prob": row.get("AI_Prob"),
+            "Combined_AI_Prob": safe_round(combined_ai, 4),
+            "IntradayMomentumScore": row.get("IntradayMomentumScore"),
+            "RS_rating_1_100": row.get("RS_rating_1_100"),
+            "Score": row.get("Score"),
+            "Volume": row.get("Volume"),
+            "IntradayTimestamp": row.get("IntradayTimestamp"),
+        }
+
+    def _direct_overview(rows: list[dict]) -> dict:
+        strong_buy = sum(1 for row in rows if row.get("Signal") == "STRONG BUY")
+        buy = sum(1 for row in rows if row.get("Signal") == "BUY")
+        sell = sum(1 for row in rows if row.get("Signal") == "SELL")
+        avoid = sum(1 for row in rows if row.get("Signal") == "AVOID")
+        accumulation = sum(1 for row in rows if row.get("Accumulation"))
+        ai_picks = sum(1 for row in rows if row.get("AI_Pick"))
+        sector_counts: dict[str, int] = {}
+        for row in rows:
+            sector = str(row.get("Sector") or "Unknown")
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        best_sector = max(sector_counts, key=sector_counts.get) if sector_counts else None
+        return {
+            "totalScanned": len(rows),
+            "strongBuy": strong_buy,
+            "buy": buy,
+            "sell": sell,
+            "avoid": avoid,
+            "accumulation": accumulation,
+            "aiPicks": ai_picks,
+            "bestSector": best_sector,
+        }
+
     def _previous_session(candles: list[list]) -> dict:
         today = date.today()
         previous_candle = None
@@ -819,6 +1404,76 @@ def create_app() -> Flask:
             }
 
         return {"results": results}, 200
+
+    @app.post("/api/screener/direct")
+    def direct_screener() -> tuple[dict, int]:
+        payload = request.get_json(silent=True) or {}
+        raw_symbols = payload.get("symbols") or []
+        if not isinstance(raw_symbols, list):
+            return {"status": "error", "message": "symbols must be an array"}, 400
+
+        limit = min(int(payload.get("limit") or _MAX_DIRECT_SCREENER_SYMBOLS), _MAX_DIRECT_SCREENER_SYMBOLS)
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for raw_symbol in raw_symbols:
+            symbol = _normalize_symbol(raw_symbol)
+            if symbol and symbol not in seen:
+                seen.add(symbol)
+                symbols.append(symbol)
+            if len(symbols) >= limit:
+                break
+
+        if not symbols:
+            return {
+                "status": "ok",
+                "source": "fyers-direct",
+                "overview": _direct_overview([]),
+                "datasets": {"allRanked": [], "liveMarket": [], "errors": []},
+            }, 200
+
+        try:
+            benchmark_rows = _history_rows(_DIRECT_BENCHMARK_SYMBOL, "D", _DIRECT_DAILY_HISTORY_DAYS)
+        except Exception as exc:
+            return {"status": "error", "message": f"Unable to load benchmark history: {exc}"}, 400
+
+        rows: list[dict] = []
+        errors: list[dict] = []
+        workers = min(6, len(symbols))
+        with ThreadPoolExecutor(max_workers=max(workers, 1)) as executor:
+            futures = {executor.submit(_build_direct_row, symbol, benchmark_rows): symbol for symbol in symbols}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    row = future.result()
+                    if row is None:
+                        errors.append({"Ticker": symbol, "Error": "Insufficient history for direct FYERS screener row."})
+                        continue
+                    rows.append(row)
+                except Exception as exc:
+                    errors.append({"Ticker": symbol, "Error": str(exc)})
+
+        rated_rows = _add_direct_rs_rating(rows)
+        ranked_rows = sorted(
+            rated_rows,
+            key=lambda row: ((as_float(row.get("Score")) or 0), (as_float(row.get("AI_Prob")) or 0)),
+            reverse=True,
+        )
+        live_rows = sorted(
+            (_direct_live_row(row) for row in ranked_rows),
+            key=lambda row: as_float(row.get("Combined_AI_Prob")) or 0,
+            reverse=True,
+        )
+
+        return {
+            "status": "ok",
+            "source": "fyers-direct",
+            "overview": _direct_overview(ranked_rows),
+            "datasets": {
+                "allRanked": ranked_rows,
+                "liveMarket": live_rows,
+                "errors": errors,
+            },
+        }, 200
 
     def _unique_symbols(rows: list, keys: tuple[str, ...]) -> list[str]:
         out: list[str] = []
