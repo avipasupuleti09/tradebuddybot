@@ -7,12 +7,8 @@
     "node": "22.x",
     "npm": ">=10"
   },
-  "workspaces": [
-    "frontend"
-  ],
   "scripts": {
-    "postinstall": "npm run build",
-    "build": "npm run build --workspace frontend",
+    "build": "npm --prefix frontend install && npm --prefix frontend run build",
     "start": "node server.js --hosted",
     "dev": "concurrently -n api,scanner,vite -c blue,magenta,green \"node server.js\" \"node --env-file=.env scanner/index.js\" \"npm --prefix frontend run dev -- --host 0.0.0.0\"",
     "dev:backend": "node server.js",
