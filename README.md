@@ -132,7 +132,7 @@ Important runtime notes:
 - Do not set `BACKEND_API_BASE` in hosted mode unless you intentionally want the scanner to call a different backend host. Leaving it unset lets `/scanner-api` reuse the same hosted Node process.
 - If Hostinger logs mention removed legacy bootstrap files, the platform is deploying an old snapshot or wrong root rather than the current Node-only app.
 - Clear Hostinger build cache or remove the old deployed app files before redeploying if stale logs persist.
-- Confirm the deployed root contains the current `package.json` where `build` installs and builds the nested frontend and `start` is `node server.js --hosted`.
+- Confirm the deployed root contains the current `package.json` where `build` runs the root Vite build and `start` is `node server.js --hosted`.
 
 Hosted runtime behavior:
 
@@ -144,7 +144,7 @@ Hosted runtime behavior:
 Implementation note:
 
 - `npm start` now runs `node server.js --hosted`; the separate `hosting` folder is no longer used.
-- The root package no longer relies on npm workspaces; `npm run build` explicitly installs and builds the nested `frontend/` app for generic hosts.
+- The root package no longer relies on npm workspaces; `npm run build` now uses a root `vite.config.js` that targets the nested `frontend/` app while keeping the Node server as the runtime entrypoint.
 
 Required environment overrides for a deployed domain:
 
