@@ -10,7 +10,12 @@ import { createScannerApp } from './scanner/index.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const distDir = path.join(__dirname, 'frontend', 'dist');
-const hostedMode = process.argv.includes('--hosted');
+
+function envFlag(name) {
+  return ['1', 'true', 'yes', 'on'].includes(String(process.env[name] || '').trim().toLowerCase());
+}
+
+const hostedMode = process.argv.includes('--hosted') || envFlag('HOSTED_MODE');
 const port = hostedMode
   ? Number(process.env.PORT || 3000)
   : Number(process.env.BACKEND_PORT || process.env.PORT || 5000);

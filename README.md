@@ -125,6 +125,7 @@ Required production environment values:
 FRONTEND_URL=https://your-domain.example
 FYERS_REDIRECT_URI=https://your-domain.example/api/auth/callback
 FYERS_PAPER_TRADE_MODE=true
+HOSTED_MODE=true
 ```
 
 Important runtime notes:
@@ -152,6 +153,7 @@ Required environment overrides for a deployed domain:
 FRONTEND_URL=https://your-domain.example
 FYERS_REDIRECT_URI=https://your-domain.example/api/auth/callback
 FYERS_PAPER_TRADE_MODE=true
+HOSTED_MODE=true
 ```
 
 ## Features
