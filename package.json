@@ -8,7 +8,7 @@
     "npm": ">=10"
   },
   "scripts": {
-    "build": "npm --prefix frontend install && npm --prefix frontend run build",
+    "build": "vite build",
     "start": "node server.js --hosted",
     "dev": "concurrently -n api,scanner,vite -c blue,magenta,green \"node server.js\" \"node --env-file=.env scanner/index.js\" \"npm --prefix frontend run dev -- --host 0.0.0.0\"",
     "dev:backend": "node server.js",
@@ -16,12 +16,19 @@
     "dev:frontend": "npm --prefix frontend run dev -- --host 0.0.0.0"
   },
   "dependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
     "exceljs": "^4.4.0",
     "express": "^4.21.0",
     "fyers-api-v3": "^1.8.0",
+    "lightweight-charts": "^5.1.0",
     "otplib": "^13.4.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.1",
+    "recharts": "^2.15.4",
+    "vite": "^8.0.8",
     "ws": "^8.20.0"
   },
   "devDependencies": {
