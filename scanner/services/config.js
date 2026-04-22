@@ -51,8 +51,21 @@ function ensurePreferredDataDir() {
   return fs.existsSync(preferredDataDir) && fs.readdirSync(preferredDataDir).length > 0 ? preferredDataDir : legacyDataDir
 }
 
+function defaultBackendApiBase() {
+  if (process.env.BACKEND_API_BASE) {
+    return process.env.BACKEND_API_BASE
+  }
+
+  const hostedMode = process.argv.includes('--hosted')
+  const port = hostedMode
+    ? Number(process.env.PORT || 3000)
+    : Number(process.env.BACKEND_PORT || 5000)
+
+  return `http://127.0.0.1:${port}`
+}
+
 const dataDir = ensurePreferredDataDir()
-const flaskApiBase = process.env.FLASK_API_BASE || 'http://localhost:5000'
+const backendApiBase = defaultBackendApiBase()
 
 export default {
   rootDir,
@@ -62,7 +75,7 @@ export default {
   bootstrapScanOnRequest: readBooleanEnv('BOOTSTRAP_SCAN_ON_REQUEST', true),
   persistWorkbook: readBooleanEnv('PERSIST_WORKBOOK', false),
   watchlistSymbols: readListEnv('WATCHLIST_SYMBOLS'),
-  watchlistApiUrl: process.env.WATCHLIST_API_URL || `${flaskApiBase}/api/watchlists`,
+  watchlistApiUrl: process.env.WATCHLIST_API_URL || `${backendApiBase}/api/watchlists`,
   sectorOverridesJson: readJsonEnv('SECTOR_OVERRIDES_JSON'),
   sectorOverridesApiUrl: process.env.SECTOR_OVERRIDES_API_URL || '',
   deliveryOverridesJson: readJsonEnv('DELIVERY_OVERRIDES_JSON'),
@@ -77,7 +90,7 @@ export default {
   deliverySheet: 'Delivery',
   deliverySymbolCol: 'Symbol',
   deliveryPctCol: 'DeliveryPct',
-  flaskApiBase,
+  backendApiBase,
   benchmark: 'NSE:NIFTY50-INDEX',
   priceHistoryDays: 1095,
   lookback52w: 252,
@@ -105,4 +118,5 @@ export default {
   intradayInterval: '5',
   intradayHorizonBars: 12,
   intradayLabelRetPct: 0.8,
+  backendApiBase,
 }

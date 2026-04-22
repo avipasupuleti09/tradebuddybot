@@ -2,13 +2,6 @@
 .env
 .tokens/
 
-# Python
-.venv/
-.venv-hosting/
-__pycache__/
-*.pyc
-*.pyo
-
 # Node
 **/node_modules/
 
@@ -22,3 +15,4 @@ frontend/dist/
 .cache/
 .data/
 data/
+profile/

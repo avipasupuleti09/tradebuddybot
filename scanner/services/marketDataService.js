@@ -1,7 +1,7 @@
 import config from './config.js'
 import { toFyersTicker } from './utils.js'
 
-const FYERS_API = config.flaskApiBase
+const FYERS_API = config.backendApiBase
 
 async function fetchJson(url) {
   const response = await fetch(url, {

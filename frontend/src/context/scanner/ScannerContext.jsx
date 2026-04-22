@@ -36,6 +36,10 @@ const DEFAULT_DIRECT_GROUP_IDS = [
   "bse-sensex",
 ];
 
+function isTransientFyersRateLimit(message) {
+  return /request limit reached|retry after few mins|rate limit/i.test(String(message || ""));
+}
+
 export function ScannerProvider({ children }) {
   const [dashboard, setDashboard] = useState(null);
   const [liveData, setLiveData] = useState([]);
@@ -59,6 +63,16 @@ export function ScannerProvider({ children }) {
   const [watchlistLoading, setWatchlistLoading] = useState(false);
   const [marketSymbols, setMarketSymbols] = useState([]);
   const initialLoadRef = useRef(false);
+  const hasDashboardRows = (dashboard?.datasets?.allRanked || []).length > 0;
+
+  function setScannerErrorFromFailure(err, fallbackMessage) {
+    const message = err?.message || fallbackMessage;
+    if (hasDashboardRows && isTransientFyersRateLimit(message)) {
+      setError("");
+      return;
+    }
+    setError(message);
+  }
 
   const defaultUniverseSymbols = useMemo(
     () => buildDefaultDirectUniverseSymbols(marketSymbols),
@@ -141,7 +155,7 @@ export function ScannerProvider({ children }) {
       setDashboard(payload);
       setLiveData(payload?.datasets?.liveMarket || []);
     } catch (err) {
-      setError(err.message || "Failed to load direct FYERS screener dashboard");
+      setScannerErrorFromFailure(err, "Failed to load direct FYERS screener dashboard");
     } finally {
       setLoading(false);
       setLoadStartTime(null);
@@ -182,7 +196,7 @@ export function ScannerProvider({ children }) {
       setDashboard(payload);
       setLiveData(payload?.datasets?.liveMarket || []);
     } catch (err) {
-      setError(err.message || "Failed to run direct FYERS watchlist scan");
+      setScannerErrorFromFailure(err, "Failed to run direct FYERS watchlist scan");
     } finally {
       setScanning(false);
       setLoadStartTime(null);
@@ -211,7 +225,7 @@ export function ScannerProvider({ children }) {
       const payload = await fetchDirectScreener(symbolsToScan, liveRows);
       setLiveData(payload?.datasets?.liveMarket || []);
     } catch (err) {
-      setError(err.message || "Failed to load live data");
+      setScannerErrorFromFailure(err, "Failed to load live data");
     }
   }
 
@@ -227,7 +241,7 @@ export function ScannerProvider({ children }) {
       setDashboard(payload);
       setLiveData(payload?.datasets?.liveMarket || []);
     } catch (err) {
-      setError(err.message || "Failed to run direct FYERS scan");
+      setScannerErrorFromFailure(err, "Failed to run direct FYERS scan");
     } finally {
       setScanning(false);
       setLoadStartTime(null);

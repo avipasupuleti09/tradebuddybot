@@ -1,5 +1,5 @@
-import { useScannerContext } from "./ScannerContext";
-import { IcPlay, IcRefresh, ScannerKpiGrid } from "./ScannerShared";
+import { useScannerContext } from "./context/scanner/ScannerContext";
+import { IcPlay, IcRefresh, ScannerKpiGrid } from "./components/scanner/ScannerShared";
 
 export default function ScannerCommandDeck() {
   const {

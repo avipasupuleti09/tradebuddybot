@@ -1,1 +1,0 @@
-"""TradeBuddy FYERS backend package."""

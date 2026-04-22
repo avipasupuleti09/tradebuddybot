@@ -252,6 +252,10 @@ const METRIC_CONFIG = {
   },
 };
 
+function isTransientFyersRateLimit(message) {
+  return /request limit reached|retry after few mins|rate limit/i.test(String(message || ""));
+}
+
 export default function DashboardScreenerHub() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -283,8 +287,19 @@ export default function DashboardScreenerHub() {
   const [tableSearchOpen, setTableSearchOpen] = useState(false);
   const [tableSort, setTableSort] = useState({ key: "", direction: "desc" });
   const tableSearchInputRef = useRef(null);
+  const hasAutoOpenedDefaultScreenerRef = useRef(false);
   const directBootstrapRef = useRef("");
   const shellTabRefreshReadyRef = useRef(false);
+
+  function setScreenerErrorFromFailure(err, fallbackMessage) {
+    const message = err?.message || fallbackMessage;
+    const hasRankedRows = (dashboard?.datasets?.allRanked || []).length > 0;
+    if (hasRankedRows && isTransientFyersRateLimit(message)) {
+      setError("");
+      return;
+    }
+    setError(message);
+  }
 
   useEffect(() => {
     loadUniverseCatalog();
@@ -455,11 +470,26 @@ export default function DashboardScreenerHub() {
   const resultStats = useMemo(() => buildResultStats(scopedRows), [scopedRows]);
 
   useEffect(() => {
+    if (hasAutoOpenedDefaultScreenerRef.current) {
+      return;
+    }
+    if (activeShellTab !== "screeners" || selectedScreenerId || !activeCategory?.cards?.length) {
+      return;
+    }
+    const nextScreenerId = getPreferredCategoryCardId(activeCategory);
+    if (!nextScreenerId) {
+      return;
+    }
+    hasAutoOpenedDefaultScreenerRef.current = true;
+    setSelectedScreenerId(nextScreenerId);
+  }, [activeCategory, activeShellTab, selectedScreenerId]);
+
+  useEffect(() => {
     if (!activeCategory) {
       return;
     }
     if (selectedScreenerId && !activeCategory.cards.some((card) => card.id === selectedScreenerId)) {
-      setSelectedScreenerId("");
+      setSelectedScreenerId(getPreferredCategoryCardId(activeCategory));
     }
   }, [activeCategory, selectedScreenerId]);
 
@@ -513,7 +543,7 @@ export default function DashboardScreenerHub() {
       setActiveScanSymbols(symbolsToScan);
       setLastUpdated(formatTimestamp(new Date()));
     } catch (err) {
-      setError(err.message || "Unable to load direct FYERS screener data.");
+      setScreenerErrorFromFailure(err, "Unable to load direct FYERS screener data.");
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -613,7 +643,7 @@ export default function DashboardScreenerHub() {
           setUniverseOpen(false);
         }
       } catch (err) {
-        setError(err.message || "Unable to load the selected FYERS universe.");
+        setScreenerErrorFromFailure(err, "Unable to load the selected FYERS universe.");
       } finally {
         setRefreshing(false);
       }
@@ -675,7 +705,7 @@ export default function DashboardScreenerHub() {
                   onClick={() => {
                     setActiveShellTab("screeners");
                     setActiveCategoryId(category.id);
-                    setSelectedScreenerId("");
+                    setSelectedScreenerId(getPreferredCategoryCardId(category));
                   }}
                 >
                   <span className="dashboard-screener-nav-icon"><Icon /></span>
@@ -792,8 +822,19 @@ export default function DashboardScreenerHub() {
                           <DirectionGlyph direction={card.direction} />
                         </span>
                       </div>
+                      <div className="dashboard-screener-card-meta-row">
+                        <span className="dashboard-screener-card-count">{card.count.toLocaleString()} stocks</span>
+                        <span className={`dashboard-screener-card-metric ${card.direction}`}>{card.metricLabel}</span>
+                      </div>
                     </div>
                     <p>{card.description}</p>
+                    <div className="dashboard-screener-card-preview-row">
+                      <div className="dashboard-screener-card-preview-copy">
+                        <span className="dashboard-screener-card-preview-label">Lead ticker</span>
+                        <strong>{card.leadTicker || "Awaiting data"}</strong>
+                      </div>
+                      <span className={`dashboard-screener-signal ${signalTone(card.leadSignal)}`}>{card.leadSignal}</span>
+                    </div>
                   </button>
                 ))}
               </div>
@@ -1256,6 +1297,17 @@ function HeatmapView({ rows, metricTab }) {
       </div>
     </div>
   );
+}
+
+function getPreferredCategoryCardId(category, preferredId = "") {
+  const cards = category?.cards || [];
+  if (!cards.length) {
+    return "";
+  }
+  if (preferredId && cards.some((card) => card.id === preferredId)) {
+    return preferredId;
+  }
+  return cards.find((card) => Array.isArray(card.rows) && card.rows.length > 0)?.id || cards[0].id;
 }
 
 function buildCategories(rows, favoriteIds) {

@@ -10,6 +10,7 @@ import {
   addSymbolToWatchlist,
   removeSymbolFromWatchlist,
 } from "../api";
+import { normalizeMarketIndexSymbol } from "../lib/marketIndexes";
 import { getNextSortState, sortRowsByAccessor } from "../lib/tableSort";
 
 /* ─── helpers ──────────────────────────────────────────────────────────────── */
@@ -24,6 +25,14 @@ function debounce(fn, ms) {
 function formatNum(v) {
   if (v == null) return "-";
   return Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2 });
+}
+
+function splitMarketSymbol(symbol) {
+  const [exchange, ticker] = String(symbol || "").split(":");
+  return {
+    exchange: exchange || "NSE",
+    ticker: ticker || String(symbol || ""),
+  };
 }
 
 function SortableTableHeader({ label, sortKey, sortState, onSort, className = "", align = "left", defaultDirection = "asc" }) {
@@ -44,10 +53,80 @@ function SortableTableHeader({ label, sortKey, sortState, onSort, className = ""
 const MFI_SIGNAL_LENGTH = 10;
 const MFI_OVERBOUGHT_LEVEL = 80;
 const MFI_OVERSOLD_LEVEL = 20;
+const IST_OFFSET_SECONDS = ((5 * 60) + 30) * 60;
+const EMPTY_CHART_REFERENCE_LEVELS = {
+  prevClose: null,
+  todayHigh: null,
+  todayLow: null,
+};
+
+function toIstChartTime(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
+  const epochSeconds = numeric > 1e10 ? Math.floor(numeric / 1000) : numeric;
+  return epochSeconds + IST_OFFSET_SECONDS;
+}
+
+function getChartReferenceLineColors(isDarkTheme) {
+  return isDarkTheme
+    ? {
+        prevClose: "rgba(125, 227, 255, 0.82)",
+        todayHigh: "rgba(250, 137, 107, 0.82)",
+        todayLow: "rgba(19, 222, 185, 0.82)",
+      }
+    : {
+        prevClose: "rgba(74, 111, 216, 0.82)",
+        todayHigh: "rgba(214, 69, 69, 0.82)",
+        todayLow: "rgba(11, 168, 136, 0.82)",
+      };
+}
+
+function buildChartReferenceItems(levels, colors) {
+  return [
+    {
+      key: "todayHigh",
+      price: levels.todayHigh,
+      color: colors.todayHigh,
+      title: "Day High",
+      lineStyle: LineStyle.Dotted,
+    },
+    {
+      key: "prevClose",
+      price: levels.prevClose,
+      color: colors.prevClose,
+      title: "Prev Close",
+      lineStyle: LineStyle.Dotted,
+    },
+    {
+      key: "todayLow",
+      price: levels.todayLow,
+      color: colors.todayLow,
+      title: "Day Low",
+      lineStyle: LineStyle.Dotted,
+    },
+  ];
+}
 
 function toFiniteNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function buildChartReferenceLevels(quote = {}) {
+  return {
+    prevClose: toFiniteNumber(quote.prev_close_price ?? quote.prev_close ?? quote.c),
+    todayHigh: toFiniteNumber(quote.high_price ?? quote.h),
+    todayLow: toFiniteNumber(quote.low_price ?? quote.l),
+  };
+}
+
+function hasSameChartReferenceLevels(currentLevels, nextLevels) {
+  return currentLevels.prevClose === nextLevels.prevClose
+    && currentLevels.todayHigh === nextLevels.todayHigh
+    && currentLevels.todayLow === nextLevels.todayLow;
 }
 
 function calculateMfiSeries(candles, length = MFI_SIGNAL_LENGTH) {
@@ -189,6 +268,38 @@ function mergeTickIntoCandles(candles, tickCandle, volume) {
   return nextCandles;
 }
 
+function normalizeHistoryCandles(rawCandles) {
+  const deduped = new Map();
+
+  for (const candle of Array.isArray(rawCandles) ? rawCandles : []) {
+    if (!Array.isArray(candle) || candle.length < 5) {
+      continue;
+    }
+
+    const time = toIstChartTime(candle[0]);
+    const open = Number(candle[1]);
+    const high = Number(candle[2]);
+    const low = Number(candle[3]);
+    const close = Number(candle[4]);
+    const volume = Number(candle[5] ?? 0);
+
+    if (![time, open, high, low, close].every(Number.isFinite)) {
+      continue;
+    }
+
+    deduped.set(time, {
+      time,
+      open,
+      high,
+      low,
+      close,
+      volume: Number.isFinite(volume) ? volume : 0,
+    });
+  }
+
+  return Array.from(deduped.values()).sort((left, right) => left.time - right.time);
+}
+
 
 /* ─── All time intervals, grouped like FYERS ──────────────────────────────── */
 const ALL_INTERVALS = [
@@ -277,6 +388,8 @@ const DAYS_OPTIONS = [
   { days: 7300, label: "All" },
 ];
 
+const CHART_TICK_POLL_MS = 5000;
+
 const FALLBACK_PREDEFINED_WATCHLISTS = [
   { id: "nifty50", name: "NIFTY 50", symbols: ["NSE:NIFTY50-INDEX", "NSE:RELIANCE-EQ", "NSE:HDFCBANK-EQ", "NSE:ICICIBANK-EQ", "NSE:INFY-EQ"] },
   { id: "banking", name: "Banking Leaders", symbols: ["NSE:NIFTYBANK-INDEX", "NSE:SBIN-EQ", "NSE:AXISBANK-EQ", "NSE:KOTAKBANK-EQ", "NSE:INDUSINDBK-EQ"] },
@@ -290,7 +403,7 @@ const FALLBACK_SMART_WATCHLISTS = [
 ];
 
 /* ─── Main component ──────────────────────────────────────────────────────── */
-export default function MarketsPage() {
+export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
   const WATCH_TABS = {
     MY: "my",
     PREDEFINED: "predefined",
@@ -353,6 +466,7 @@ export default function MarketsPage() {
   const [showIntervalDropdown, setShowIntervalDropdown] = useState(false);
   const intervalDropdownRef = useRef(null);
 
+  const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
 
   const activePredefinedList = predefinedLists.find((item) => item.id === activePredefined) || predefinedLists[0];
@@ -544,9 +658,13 @@ export default function MarketsPage() {
     };
 
     poll();
+    if (!marketHoursActive) {
+      return undefined;
+    }
+
     quotesTimer.current = setInterval(poll, 5000);
     return () => clearInterval(quotesTimer.current);
-  }, [activeSymbols]);
+  }, [activeSymbols, marketHoursActive]);
 
   /* ── Debounced symbol search ── */
   const doSearch = useCallback(
@@ -583,39 +701,81 @@ export default function MarketsPage() {
 
   /* ── Chart loading ── */
   const [ohlcInfo, setOhlcInfo] = useState(null); // crosshair hover info
+  const [chartReferenceLevels, setChartReferenceLevels] = useState(EMPTY_CHART_REFERENCE_LEVELS);
+  const [chartReferenceLabels, setChartReferenceLabels] = useState([]);
+  const [chartClock, setChartClock] = useState(() => new Date());
   const chartContainerRef = useRef(null);
   const chartInstanceRef = useRef(null);
   const mfiChartContainerRef = useRef(null);
   const mfiChartInstanceRef = useRef(null);
   const candleSeriesRef = useRef(null);
+  const chartReferenceLinesRef = useRef([]);
   const markerSeriesRef = useRef(null);
   const mfiLineSeriesRef = useRef(null);
   const tickTimerRef = useRef(null);
   const chartDataRef = useRef([]);
   const syncingLogicalRangeRef = useRef(false);
+  const defaultChartSeedRef = useRef("");
 
   useEffect(() => {
     chartDataRef.current = chartData;
   }, [chartData]);
 
   useEffect(() => {
+    const timerId = window.setInterval(() => {
+      setChartClock(new Date());
+    }, 1000);
+
+    return () => window.clearInterval(timerId);
+  }, []);
+
+  useEffect(() => {
+    const nextDefaultChartSymbol = normalizeMarketIndexSymbol(defaultChartSymbol);
+    if (defaultChartSeedRef.current === nextDefaultChartSymbol) {
+      return;
+    }
+
+    defaultChartSeedRef.current = nextDefaultChartSymbol;
+    setChartSymbol(nextDefaultChartSymbol);
+    setOhlcInfo(null);
+  }, [defaultChartSymbol]);
+
+  useEffect(() => {
+    if (!chartSymbol) {
+      setChartReferenceLevels(EMPTY_CHART_REFERENCE_LEVELS);
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    fetchQuotes([chartSymbol])
+      .then((data) => {
+        if (cancelled) {
+          return;
+        }
+        const quote = data?.d?.[0]?.v || data?.d?.[0] || {};
+        const nextLevels = buildChartReferenceLevels(quote);
+        setChartReferenceLevels((current) => (hasSameChartReferenceLevels(current, nextLevels) ? current : nextLevels));
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [chartSymbol]);
+
+  useEffect(() => {
     if (!chartSymbol) return;
     let cancelled = false;
+    setError("");
     setChartLoading(true);
     fetchHistory(chartSymbol, resolution, days)
       .then((data) => {
         if (cancelled) return;
-        const raw = data.candles || [];
-        // lightweight-charts needs {time, open, high, low, close}
-        const candles = raw.map((c) => ({
-          time: c[0], // unix seconds
-          open: c[1],
-          high: c[2],
-          low: c[3],
-          close: c[4],
-          volume: c[5],
-        }));
+        const candles = normalizeHistoryCandles(data.candles);
         setChartData(candles);
+        setOhlcInfo(candles[candles.length - 1] || null);
+        setError("");
       })
       .catch((err) => {
         if (!cancelled) setError(err.message);
@@ -650,92 +810,208 @@ export default function MarketsPage() {
           grid: "#f0f0f0",
           border: "#e0e0e0",
         };
+    const priceScaleMode = percentScale ? 1 : logScale ? 2 : 0;
 
-    const chart = createChart(container, {
-      width: container.clientWidth,
-      height: container.clientHeight || 480,
-      layout: {
-        background: { type: ColorType.Solid, color: chartColors.bg },
-        textColor: chartColors.text,
-        fontSize: 11,
-      },
-      grid: {
-        vertLines: { color: chartColors.grid },
-        horzLines: { color: chartColors.grid },
-      },
-      crosshair: { mode: CrosshairMode.Normal },
-      handleScroll: { mouseWheel: true, pressedMouseMove: true, vertTouchDrag: true },
-      handleScale: { axisPressedMouseMove: { price: true, time: true }, mouseWheel: true, pinch: true },
-      rightPriceScale: {
-        borderColor: chartColors.border,
-        autoScale: true,
-        mode: 0, // Normal
-      },
-      timeScale: {
-        borderColor: chartColors.border,
-        timeVisible: true,
-        secondsVisible: false,
-      },
-    });
-    chartInstanceRef.current = chart;
+    try {
+      const chart = createChart(container, {
+        width: container.clientWidth,
+        height: container.clientHeight || 480,
+        layout: {
+          background: { type: ColorType.Solid, color: chartColors.bg },
+          textColor: chartColors.text,
+          fontSize: 11,
+        },
+        grid: {
+          vertLines: { color: chartColors.grid },
+          horzLines: { color: chartColors.grid },
+        },
+        crosshair: { mode: CrosshairMode.Normal },
+        handleScroll: { mouseWheel: true, pressedMouseMove: true, vertTouchDrag: true },
+        handleScale: { axisPressedMouseMove: { price: true, time: true }, mouseWheel: true, pinch: true },
+        leftPriceScale: {
+          visible: false,
+          borderColor: chartColors.border,
+        },
+        rightPriceScale: {
+          visible: true,
+          borderColor: chartColors.border,
+          autoScale,
+          mode: priceScaleMode,
+        },
+        timeScale: {
+          borderColor: chartColors.border,
+          timeVisible: true,
+          secondsVisible: false,
+        },
+      });
+      chartInstanceRef.current = chart;
 
-    // --- Candlestick series ---
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: "#13deb9",
-      downColor: "#fa896b",
-      borderUpColor: "#13deb9",
-      borderDownColor: "#fa896b",
-      wickUpColor: "#13deb9",
-      wickDownColor: "#fa896b",
-    });
-    candleSeriesRef.current = candleSeries;
-    candleSeries.setData(chartData.map((c) => ({
-      time: c.time,
-      open: c.open,
-      high: c.high,
-      low: c.low,
-      close: c.close,
-    })));
+      const candleSeries = chart.addSeries(CandlestickSeries, {
+        priceScaleId: "right",
+        upColor: "#13deb9",
+        downColor: "#fa896b",
+        borderUpColor: "#13deb9",
+        borderDownColor: "#fa896b",
+        wickUpColor: "#13deb9",
+        wickDownColor: "#fa896b",
+        lastValueVisible: true,
+        priceLineVisible: true,
+        priceLineColor: isDarkTheme ? "#ff8b6a" : "#d95f40",
+        priceLineStyle: LineStyle.Solid,
+      });
+      candleSeriesRef.current = candleSeries;
+      candleSeries.setData(chartData.map((c) => ({
+        time: c.time,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      })));
 
-    const mfiArtifacts = buildMfiArtifacts(chartData);
-    const markerSeries = createSeriesMarkers(candleSeries);
-    markerSeries.setMarkers(mfiArtifacts.markers);
-    markerSeriesRef.current = markerSeries;
+      const mfiArtifacts = buildMfiArtifacts(chartData);
+      const markerSeries = createSeriesMarkers(candleSeries);
+      markerSeries.setMarkers(mfiArtifacts.markers);
+      markerSeriesRef.current = markerSeries;
 
-    // --- Crosshair OHLC info ---
-    const lastCandle = chartData[chartData.length - 1];
-    const mfiSeriesLookup = new Map(mfiArtifacts.series.map((point) => [point.time, point.value]));
-    setOhlcInfo(lastCandle);
-    setMfiInfo(mfiArtifacts.lastValue);
+      const lastCandle = chartData[chartData.length - 1];
+      const mfiSeriesLookup = new Map(mfiArtifacts.series.map((point) => [point.time, point.value]));
+      setOhlcInfo(lastCandle);
+      setMfiInfo(mfiArtifacts.lastValue);
 
-    chart.subscribeCrosshairMove((param) => {
-      if (!param.time) {
-        setOhlcInfo(lastCandle);
-        setMfiInfo(mfiArtifacts.lastValue);
-        return;
-      }
-      const d = param.seriesData.get(candleSeries);
-      if (d) setOhlcInfo(d);
-      const hoveredMfiValue = mfiSeriesLookup.get(param.time);
-      setMfiInfo(typeof hoveredMfiValue === "number" ? hoveredMfiValue : mfiArtifacts.lastValue);
-    });
+      chart.subscribeCrosshairMove((param) => {
+        if (!param.time) {
+          setOhlcInfo(lastCandle);
+          setMfiInfo(mfiArtifacts.lastValue);
+          return;
+        }
+        const d = param.seriesData.get(candleSeries);
+        if (d) setOhlcInfo(d);
+        const hoveredMfiValue = mfiSeriesLookup.get(param.time);
+        setMfiInfo(typeof hoveredMfiValue === "number" ? hoveredMfiValue : mfiArtifacts.lastValue);
+      });
 
-    // Resize observer
-    const ro = new ResizeObserver(() => {
-      chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
-    });
-    ro.observe(container);
+      const ro = new ResizeObserver(() => {
+        chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+      });
+      ro.observe(container);
 
-    chart.timeScale().fitContent();
+      chart.timeScale().fitContent();
 
-    return () => {
-      ro.disconnect();
-      chart.remove();
+      return () => {
+        ro.disconnect();
+        chart.remove();
+        chartInstanceRef.current = null;
+        candleSeriesRef.current = null;
+        chartReferenceLinesRef.current = [];
+        markerSeriesRef.current = null;
+      };
+    } catch (err) {
       chartInstanceRef.current = null;
       candleSeriesRef.current = null;
+      chartReferenceLinesRef.current = [];
       markerSeriesRef.current = null;
+      setError(err?.message || "Unable to render chart.");
+      return undefined;
+    }
+  }, [autoScale, chartData, isDarkTheme, logScale, percentScale]);
+
+  useEffect(() => {
+    const candleSeries = candleSeriesRef.current;
+    if (!candleSeries) {
+      return undefined;
+    }
+
+    chartReferenceLinesRef.current.forEach((line) => {
+      try {
+        candleSeries.removePriceLine(line);
+      } catch {
+        // Ignore stale line refs during chart rebuilds.
+      }
+    });
+
+    chartReferenceLinesRef.current = [];
+
+    const referenceItems = buildChartReferenceItems(chartReferenceLevels, getChartReferenceLineColors(isDarkTheme));
+
+    referenceItems.forEach((line) => {
+      if (!Number.isFinite(line.price)) {
+        return;
+      }
+
+      chartReferenceLinesRef.current.push(candleSeries.createPriceLine({
+        price: line.price,
+        color: line.color,
+        lineWidth: 1,
+        lineStyle: line.lineStyle,
+        lineVisible: true,
+        axisLabelVisible: false,
+      }));
+    });
+
+    return () => {
+      chartReferenceLinesRef.current.forEach((line) => {
+        try {
+          candleSeries.removePriceLine(line);
+        } catch {
+          // Ignore stale line refs during effect cleanup.
+        }
+      });
+      chartReferenceLinesRef.current = [];
     };
-  }, [chartData, isDarkTheme]);
+  }, [autoScale, chartData, chartReferenceLevels, isDarkTheme, logScale, percentScale]);
+
+  useEffect(() => {
+    const chart = chartInstanceRef.current;
+    const candleSeries = candleSeriesRef.current;
+    const container = chartContainerRef.current;
+
+    if (!chart || !candleSeries || !container) {
+      setChartReferenceLabels([]);
+      return undefined;
+    }
+
+    const referenceItems = buildChartReferenceItems(chartReferenceLevels, getChartReferenceLineColors(isDarkTheme));
+
+    const syncReferenceLabels = () => {
+      const containerHeight = container.clientHeight || 0;
+      const nextLabels = referenceItems
+        .map((item) => {
+          if (!Number.isFinite(item.price)) {
+            return null;
+          }
+
+          const coordinate = candleSeries.priceToCoordinate(item.price);
+          if (!Number.isFinite(coordinate)) {
+            return null;
+          }
+
+          const clampedTop = containerHeight
+            ? Math.min(Math.max(coordinate, 12), Math.max(containerHeight - 12, 12))
+            : coordinate;
+
+          return {
+            key: item.key,
+            title: item.title,
+            color: item.color,
+            top: clampedTop,
+          };
+        })
+        .filter(Boolean);
+
+      setChartReferenceLabels(nextLabels);
+    };
+
+    const frameId = window.requestAnimationFrame(syncReferenceLabels);
+    const resizeObserver = new ResizeObserver(syncReferenceLabels);
+    resizeObserver.observe(container);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(syncReferenceLabels);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      resizeObserver.disconnect();
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(syncReferenceLabels);
+    };
+  }, [autoScale, chartData, chartReferenceLevels, isDarkTheme, logScale, percentScale]);
 
   useEffect(() => {
     if (!mfiChartContainerRef.current || !chartSymbol || chartData.length === 0) {
@@ -896,7 +1172,7 @@ export default function MarketsPage() {
   /* ── Live tick-by-tick updates (poll every 1s) ── */
   useEffect(() => {
     if (tickTimerRef.current) clearInterval(tickTimerRef.current);
-    if (!chartSymbol || !candleSeriesRef.current) return;
+    if (!chartSymbol || !candleSeriesRef.current || !marketHoursActive) return;
 
     const resSeconds = resolution === "D" ? 86400
       : resolution.startsWith("S") ? parseInt(resolution.slice(1), 10)
@@ -912,7 +1188,7 @@ export default function MarketsPage() {
         if (ltp == null) return;
 
         // Compute the candle time bucket for the current tick
-        const nowSec = Math.floor(Date.now() / 1000);
+        const nowSec = Math.floor(Date.now() / 1000) + IST_OFFSET_SECONDS;
         const candleTime = Math.floor(nowSec / resSeconds) * resSeconds;
 
         // Update candlestick: .update() will either update current bar or add new one
@@ -923,6 +1199,10 @@ export default function MarketsPage() {
           low: q.low_price || ltp,
           close: ltp,
         };
+        const lastCandleTime = chartDataRef.current[chartDataRef.current.length - 1]?.time;
+        if (Number.isFinite(lastCandleTime) && tickCandle.time < lastCandleTime) {
+          return;
+        }
         candleSeriesRef.current.update(tickCandle);
 
         chartDataRef.current = mergeTickIntoCandles(chartDataRef.current, tickCandle, q.volume || 0);
@@ -930,6 +1210,8 @@ export default function MarketsPage() {
         markerSeriesRef.current?.setMarkers(mfiArtifacts.markers);
         mfiLineSeriesRef.current?.setData(mfiArtifacts.series);
         setMfiInfo(mfiArtifacts.lastValue);
+        const nextLevels = buildChartReferenceLevels(q);
+        setChartReferenceLevels((current) => (hasSameChartReferenceLevels(current, nextLevels) ? current : nextLevels));
 
         // Update OHLC header with live values
         setOhlcInfo((prev) => ({
@@ -945,9 +1227,9 @@ export default function MarketsPage() {
     };
 
     pollTick();
-    tickTimerRef.current = setInterval(pollTick, 1000);
+    tickTimerRef.current = setInterval(pollTick, CHART_TICK_POLL_MS);
     return () => clearInterval(tickTimerRef.current);
-  }, [chartSymbol, resolution, chartData]);
+  }, [chartSymbol, resolution, chartData.length, marketHoursActive]);
 
   /* ── Handlers ── */
   async function handleCreateList() {
@@ -1049,12 +1331,17 @@ export default function MarketsPage() {
   }
 
   function handleRowClick(symbol) {
+    setError("");
+    setNotice("");
     setSelectedSymbol(symbol);
     setChartSymbol(symbol);
   }
 
+  const chartSymbolParts = useMemo(() => splitMarketSymbol(chartSymbol), [chartSymbol]);
+
   return (
     <div className="markets-page">
+      {notice && <p className="info-bar">{notice}</p>}
       {error && <p className="error-bar">{error}</p>}
 
       <div className="markets-layout">
@@ -1235,7 +1522,7 @@ export default function MarketsPage() {
                       {showSmartActionsMenu && (
                         <div className="fwl-smart-popover fwl-smart-actions-menu">
                           <button onClick={handleSmartAddToMyWatchlist}>Add to my watchlist</button>
-                          <button onClick={() => { setError("Related news integration can be added next."); setShowSmartActionsMenu(false); }}>Related news</button>
+                          <button onClick={() => { setError(""); setNotice("Related news integration can be added next."); setShowSmartActionsMenu(false); }}>Related news</button>
                           <button onClick={() => { setSmartSymbolQuery((selectedSymbol || "").replace("NSE:", "")); setShowSmartActionsMenu(false); }}>Search</button>
                         </div>
                       )}
@@ -1344,7 +1631,7 @@ export default function MarketsPage() {
               <>
               {/* Top bar: bookmarked resolution buttons + dropdown like FYERS */}
               <div className="chart-top-bar">
-                <span className="chart-symbol-label">{chartSymbol.replace("NSE:", "")}</span>
+                <span className="chart-symbol-label">{chartSymbolParts.ticker}</span>
                 <div className="chart-res-btns">
                   {bookmarkedIntervals.map((r) => (
                     <button
@@ -1401,7 +1688,7 @@ export default function MarketsPage() {
               {/* OHLC header like FYERS */}
               <div className="chart-ohlc-header">
                 <div className="chart-title-row">
-                  <span className="chart-symbol-name">{chartSymbol.replace("NSE:", "")} · {resolution === "D" ? "D" : resolution} · NSE</span>
+                  <span className="chart-symbol-name">{chartSymbolParts.ticker} · {resolution === "D" ? "D" : resolution} · {chartSymbolParts.exchange}</span>
                   {ohlcInfo && (
                     <span className="chart-ohlc-vals">
                       O<b>{formatNum(ohlcInfo.open)}</b>{" "}
@@ -1422,6 +1709,9 @@ export default function MarketsPage() {
                     </span>
                   ) : null}
                 </div>
+                <span className="chart-time-display chart-time-display-header">
+                  {chartClock.toLocaleTimeString("en-IN", { hour12: false, timeZone: "Asia/Kolkata" })} UTC+5:30
+                </span>
 
               </div>
 
@@ -1432,7 +1722,26 @@ export default function MarketsPage() {
                 ) : chartData.length === 0 ? (
                   <p className="fwl-hint" style={{ padding: 40 }}>No data for this range.</p>
                 ) : (
-                  <div ref={chartContainerRef} className="lw-chart-container" />
+                  <>
+                    <div ref={chartContainerRef} className="lw-chart-container" />
+                    {chartReferenceLabels.length ? (
+                      <div className="chart-reference-labels" aria-hidden="true">
+                        {chartReferenceLabels.map((item) => (
+                          <span
+                            key={item.key}
+                            className="chart-reference-label"
+                            style={{
+                              top: `${item.top}px`,
+                              backgroundColor: item.color,
+                              borderColor: item.color,
+                            }}
+                          >
+                            {item.title}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </>
                 )}
               </div>
 
@@ -1456,7 +1765,6 @@ export default function MarketsPage() {
                   ))}
                 </div>
                 <div className="chart-scale-btns">
-                  <span className="chart-time-display">{new Date().toLocaleTimeString("en-IN", { hour12: false })} UTC+5:30</span>
                   <button
                     className={`chart-period-btn${percentScale ? " active" : ""}`}
                     title="Percentage scale"
@@ -1505,7 +1813,7 @@ export default function MarketsPage() {
                 <div className="panel-head wl-mfi-panel-head">
                   <div>
                     <h3>MFI Oscillator</h3>
-                    <p>{chartSymbol.replace("NSE:", "")} · Money Flow Index ({MFI_SIGNAL_LENGTH})</p>
+                    <p>{chartSymbolParts.ticker} · Money Flow Index ({MFI_SIGNAL_LENGTH})</p>
                   </div>
                   {mfiInfo !== null ? (
                     <span className={`wl-mfi-value-chip ${mfiInfo >= MFI_OVERBOUGHT_LEVEL ? "wl-mfi-value-chip-sell" : mfiInfo <= MFI_OVERSOLD_LEVEL ? "wl-mfi-value-chip-buy" : ""}`}>

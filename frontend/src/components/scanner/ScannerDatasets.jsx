@@ -100,17 +100,6 @@ export default function ScannerDatasets() {
                 </div>
                 <div className="mover-primary">{m.primary}</div>
                 <div className="mover-secondary">{m.secondary}</div>
-                {/* Debug overlay for missing/null fields */}
-                {process.env.NODE_ENV !== 'production' && (
-                  <div style={{ background: 'rgba(255,0,0,0.08)', color: '#c00', fontSize: 11, padding: 4, marginBottom: 4, borderRadius: 4 }}>
-                    <strong>Debug:</strong> Missing fields: {
-                      Object.entries(m.details || {})
-                        .filter(([k, v]) => v === null || v === undefined || v === "")
-                        .map(([k]) => k)
-                        .join(', ') || 'None'
-                    }
-                  </div>
-                )}
                 <div className="mover-details-grid">
                   <div className="mover-detail-item"><span>LTP</span><strong>{fmtCardPrice(m.details?.ltp)}</strong></div>
                   <div className="mover-detail-item"><span>Open</span><strong>{fmtCardPrice(m.details?.open)}</strong></div>

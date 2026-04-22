@@ -1,5 +1,5 @@
-import { useScannerContext } from "./ScannerContext";
-import { IcFilter, ScannerDataTable } from "./ScannerShared";
+import { useScannerContext } from "./context/scanner/ScannerContext";
+import { IcFilter, ScannerDataTable } from "./components/scanner/ScannerShared";
 
 export default function ScannerFilterLab() {
   const { filters, setFilters, sectors, filteredDisplayRows } = useScannerContext();

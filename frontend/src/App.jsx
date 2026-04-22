@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { NavLink, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
-import { API_BASE, fetchDashboard, fetchDirectScreener, fetchPnlHistory, fetchQuotes, fetchSession, fetchAllNseSymbols, fetchNseSymbolAnalytics, fetchWatchlistCatalog, login, logout, placeOrder, runStrategy } from "./api";
+import { NavLink, Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { API_BASE, fetchAccountProfile, fetchDashboard, fetchDirectScreener, fetchPnlHistory, fetchQuotes, fetchSession, fetchAllNseSymbols, fetchNseSymbolAnalytics, fetchWatchlistCatalog, login, logout, placeOrder, runStrategy } from "./api";
 import {
   buildDefaultDirectUniverseSymbols,
   getCachedDefaultScreenerPayload,
@@ -9,12 +9,20 @@ import {
   setCachedMarketSymbolRows,
   setCachedWatchlistCatalog,
 } from "./lib/dashboardScreenerBootstrap";
+import {
+  DEFAULT_MARKET_INDEX_SYMBOL,
+  MARKET_INDEX_LABELS,
+  MARKET_INDEX_SYMBOLS,
+  normalizeMarketIndexSymbol,
+} from "./lib/marketIndexes";
 import { getNextSortState, sortRowsByAccessor } from "./lib/tableSort";
 import { NSE_STOCK_GROUP_OPTIONS, filterSymbolsByNseGroup, getNseGroupOption } from "./nseGroups";
 
 const MarketsPage = lazy(() => import("./pages/MarketsPage"));
+const AlertsPage = lazy(() => import("./pages/AlertsPage"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const ScannerLayout = lazy(() => import("./pages/scanner/ScannerLayout"));
-const ScannerCommandDeck = lazy(() => import("./components/scanner/ScannerCommandDeck"));
+const ScannerCommandDeck = lazy(() => import("./ScannerCommandDeck"));
 const ScannerExecution = lazy(() => import("./components/scanner/ScannerExecution"));
 const ScannerDatasets = lazy(() => import("./components/scanner/ScannerDatasets"));
 const ScannerVisuals = lazy(() => import("./components/scanner/ScannerVisuals"));
@@ -53,46 +61,55 @@ const SETTINGS_KEY = "tradebuddy-ui-settings";
 const AUTO_CAP_KEY = "tradebuddy-auto-cap";
 const APP_LOGIN_KEY = "tradebuddy-app-login";
 const PENDING_LOGIN_KEY = "tradebuddy-login-pending";
-const HOME_MARKET_SYMBOLS = [
-  "NSE:NIFTY50-INDEX",
-  "BSE:SENSEX-INDEX",
-  "NSE:NIFTYBANK-INDEX",
-  "BSE:BANKEX-INDEX",
-  "NSE:FINNIFTY-INDEX",
-  "NSE:NIFTYNXT50-INDEX",
-  "NSE:MIDCPNIFTY-INDEX",
-  "NSE:NIFTYMIDCAP100-INDEX",
-  "NSE:NIFTYSMLCAP100-INDEX",
-  "NSE:NIFTY500-INDEX",
-  "NSE:INDIAVIX-INDEX",
-];
+const HOME_MARKET_SYMBOLS = MARKET_INDEX_SYMBOLS;
+const DEFAULT_MARKET_START_TIME = "09:15";
+const DEFAULT_MARKET_END_TIME = "15:30";
+const TIME_VALUE_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const LEGACY_HOME_SYMBOLS = [
   "NSE:NIFTY50-INDEX",
   "NSE:NIFTYBANK-INDEX",
   "NSE:SBIN-EQ",
   "NSE:RELIANCE-EQ",
 ];
-const HOME_MARKET_LABELS = {
-  "NSE:NIFTY50-INDEX": "NIFTY50",
-  "BSE:SENSEX-INDEX": "SENSEX",
-  "NSE:NIFTYBANK-INDEX": "BANKNIFTY",
-  "BSE:BANKEX-INDEX": "BANKEX",
-  "NSE:FINNIFTY-INDEX": "FINNIFTY",
-  "NSE:NIFTYNXT50-INDEX": "NIFTYNXT50",
-  "NSE:MIDCPNIFTY-INDEX": "MIDCPNIFTY",
-  "NSE:NIFTYMIDCAP100-INDEX": "NIFTY MIDCAP 100",
-  "NSE:NIFTYSMLCAP100-INDEX": "NIFTY SMLCAP 100",
-  "NSE:NIFTY500-INDEX": "NIFTY 500",
-  "NSE:INDIAVIX-INDEX": "INDIAVIX",
-};
+const HOME_MARKET_LABELS = MARKET_INDEX_LABELS;
 const DEFAULT_SETTINGS = {
   watchlistSymbols: HOME_MARKET_SYMBOLS.join(","),
+  defaultChartSymbol: DEFAULT_MARKET_INDEX_SYMBOL,
   liveUpdatesEnabled: true,
   reconnectSeconds: 3,
   strategyAutoInterval: 15,
   strategyAutoMaxRuns: 2,
   strategyDailyCap: 5,
+  marketStartTime: DEFAULT_MARKET_START_TIME,
+  marketEndTime: DEFAULT_MARKET_END_TIME,
 };
+
+function normalizeTimeSetting(value, fallback) {
+  const normalized = String(value || "").trim();
+  return TIME_VALUE_PATTERN.test(normalized) ? normalized : fallback;
+}
+
+function timeSettingToMinutes(value) {
+  const [hours, minutes] = value.split(":").map(Number);
+  return (hours * 60) + minutes;
+}
+
+function isWithinMarketSession(startTime, endTime, nowValue = Date.now()) {
+  const currentDate = nowValue instanceof Date ? nowValue : new Date(nowValue);
+  const startMinutes = timeSettingToMinutes(normalizeTimeSetting(startTime, DEFAULT_MARKET_START_TIME));
+  const endMinutes = timeSettingToMinutes(normalizeTimeSetting(endTime, DEFAULT_MARKET_END_TIME));
+  const currentMinutes = (currentDate.getHours() * 60) + currentDate.getMinutes();
+
+  if (startMinutes === endMinutes) {
+    return true;
+  }
+
+  if (startMinutes < endMinutes) {
+    return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+  }
+
+  return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+}
 
 const CHART_COLORS = ["#5d87ff", "#13deb9", "#ffae1f", "#fa896b", "#7460ee", "#2a3547"];
 
@@ -103,6 +120,7 @@ function IcoDashboard() { return <svg {..._S}><rect x="3" y="3" width="7" height
 function IcoBriefcase() { return <svg {..._S}><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>; }
 function IcoOrders()    { return <svg {..._S}><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="12" y2="17"/></svg>; }
 function IcoStrategy()  { return <svg {..._S}><polygon points="13,2 3,14 12,14 11,22 21,10 12,10"/></svg>; }
+function IcoBell()      { return <svg {..._S}><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>; }
 function IcoSettings()  { return <svg {..._S}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>; }
 function IcoLogout()    { return <svg {..._S}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16,17 21,12 16,7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>; }
 function IcoBalance()   { return <svg {..._S}><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>; }
@@ -114,8 +132,26 @@ function IcoTune()      { return <svg {..._S}><line x1="4" y1="21" x2="4" y2="14
 function IcoChart()     { return <svg {..._S}><polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/></svg>; }
 function IcoTable()     { return <svg {..._S}><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg>; }
 function IcoFilter()    { return <svg {..._S}><polygon points="22,3 2,3 10,12.46 10,19 14,21 14,12.46"/></svg>; }
+function IcoRefresh()   { return <svg {..._S}><polyline points="23,4 23,10 17,10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>; }
 function IcoSun()       { return <svg {..._S}><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>; }
 function IcoMoon()      { return <svg {..._S}><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>; }
+
+function profileDisplayName(profile) {
+  return profile?.name || profile?.display_name || profile?.fy_id || "Trader";
+}
+
+function profileSecondaryLabel(profile) {
+  return profile?.fy_id || profile?.email_id || profile?.email || "Broker account connected";
+}
+
+function profileInitials(profile) {
+  return profileDisplayName(profile)
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || "")
+    .join("") || "TB";
+}
 
 function normalizeSymbols(raw) {
   return raw
@@ -424,6 +460,50 @@ function summarizePortfolioRows(rows) {
     totalPnlPct: invested ? (totalPnl / invested) * 100 : 0,
     dayPnl,
     dayPct,
+  };
+}
+
+function hydratePortfolioRowsWithLiveDayPnl(rows, portfolioQuotes = {}) {
+  return rows.map((row) => {
+    if (row.dayPnl !== null && row.dayPnl !== undefined) {
+      return row;
+    }
+
+    const quote = portfolioQuotes[row.symbol] || {};
+    const quoteChange = firstNumeric(quote.ch, quote.change, quote.netChange);
+    const quoteChangePct = firstNumeric(quote.chp, quote.changePercent, row.dayPct);
+    const qty = Math.abs(Number(row.quantity || 0));
+    const current = Number(row.current || 0);
+
+    const derivedDayPnl = quoteChange !== null
+      ? quoteChange * qty
+      : quoteChangePct !== null && current
+        ? current * (quoteChangePct / 100)
+        : null;
+
+    return {
+      ...row,
+      dayPnl: derivedDayPnl,
+      dayPct: row.dayPct ?? quoteChangePct,
+    };
+  });
+}
+
+function summarizePortfolioBreakdown(rows, fundsAvailable = 0) {
+  const summary = summarizePortfolioRows(rows);
+  const totalGain = rows.reduce((total, row) => total + Math.max(Number(row.totalPnl || 0), 0), 0);
+  const totalLoss = rows.reduce((total, row) => total + Math.abs(Math.min(Number(row.totalPnl || 0), 0)), 0);
+  const rowsWithDayPnl = rows.filter((row) => row.dayPnl !== null && row.dayPnl !== undefined);
+  const todayProfit = rowsWithDayPnl.reduce((total, row) => total + Math.max(Number(row.dayPnl || 0), 0), 0);
+  const todayLoss = rowsWithDayPnl.reduce((total, row) => total + Math.abs(Math.min(Number(row.dayPnl || 0), 0)), 0);
+
+  return {
+    ...summary,
+    fundsAvailable: Number(fundsAvailable || 0),
+    totalGain,
+    totalLoss,
+    todayProfit,
+    todayLoss,
   };
 }
 
@@ -923,6 +1003,97 @@ function HistoricalPnlHeatmap({ trades }) {
   );
 }
 
+function PortfolioOverviewBanner({ breakdown, marketRows = [] }) {
+  const items = [
+    {
+      key: "funds",
+      label: "Available Funds",
+      value: breakdown.fundsAvailable,
+      tone: "neutral",
+    },
+    {
+      key: "invested",
+      label: "Total Invested",
+      value: breakdown.invested,
+      tone: "neutral",
+    },
+    {
+      key: "net-total",
+      label: "Overall P&L",
+      value: breakdown.totalPnl,
+      tone: breakdown.totalPnl > 0 ? "positive" : breakdown.totalPnl < 0 ? "negative" : "neutral",
+    },
+    {
+      key: "net-today",
+      label: "Today's P&L",
+      value: breakdown.dayPnl ?? 0,
+      tone: breakdown.dayPnl === null ? "neutral" : breakdown.dayPnl > 0 ? "positive" : breakdown.dayPnl < 0 ? "negative" : "neutral",
+    },
+    {
+      key: "gain",
+      label: "Total Gain",
+      value: breakdown.totalGain,
+      tone: breakdown.totalGain > 0 ? "positive" : "neutral",
+    },
+    {
+      key: "loss",
+      label: "Total Loss",
+      value: breakdown.totalLoss,
+      tone: breakdown.totalLoss > 0 ? "negative" : "neutral",
+    },
+    {
+      key: "today-profit",
+      label: "Today's Profit",
+      value: breakdown.todayProfit,
+      tone: breakdown.todayProfit > 0 ? "positive" : "neutral",
+    },
+    {
+      key: "today-loss",
+      label: "Today's Loss",
+      value: breakdown.todayLoss,
+      tone: breakdown.todayLoss > 0 ? "negative" : "neutral",
+    },
+  ];
+
+  return (
+    <section className="greeting-banner portfolio-hero-banner">
+      <div className="portfolio-overview-strip" role="list" aria-label="Portfolio overview metrics">
+        {items.map((item) => (
+          <article key={item.key} className={`portfolio-overview-card ${item.tone}`} role="listitem">
+            <span className="portfolio-overview-card-label">{item.label}</span>
+            <div className="portfolio-overview-card-metrics">
+              <strong className={`portfolio-overview-card-value ${item.tone}`}>{item.key === "net-today" && breakdown.dayPnl === null ? "--" : formatCompactCurrency(item.value)}</strong>
+              <span className="portfolio-overview-card-subvalue">{item.key === "net-today" && breakdown.dayPnl === null ? "Day P&L unavailable" : formatCurrency(item.value)}</span>
+            </div>
+          </article>
+        ))}
+      </div>
+
+      {marketRows.length ? (
+        <div className="watchlist-row portfolio-hero-watchlist-row">
+          {marketRows.map((item) => {
+            const value = item.v || {};
+            const changePercent = Number(value.chp ?? 0);
+            const symbol = item.n || value.symbol;
+
+            return (
+              <div className="watch-card" key={item.n || value.symbol || symbol}>
+                <div className="sym">{homeMarketLabel(symbol)}</div>
+                <div className="watch-card-metrics">
+                  <div className="ltp">{value.lp ?? "–"}</div>
+                  <div className={`chg ${changePercent >= 0 ? "up" : "dn"}`}>
+                    {changePercent >= 0 ? "▲" : "▼"} {Math.abs(changePercent).toFixed(2)}%
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function SmartChartsBoard({ pnlSeries, holdings }) {
   const isDarkTheme = document.documentElement.getAttribute("data-theme") === "dark";
   const gridStroke = isDarkTheme ? "rgba(149, 184, 235, 0.28)" : "#e7e2f7";
@@ -1117,31 +1288,7 @@ function PortfolioTabbedSection({ holdings, positions, trades }) {
   const holdingRows = useMemo(() => holdings.map(normalizeHoldingRow), [holdings]);
   const positionRows = useMemo(() => positions.map(normalizePositionRow), [positions]);
   const activeRows = primaryTab === "holdings" ? holdingRows : positionRows;
-  const rowsWithLiveDayPnl = useMemo(() => activeRows.map((row) => {
-    if (row.dayPnl !== null && row.dayPnl !== undefined) {
-      return row;
-    }
-
-    const quote = portfolioQuotes[row.symbol] || {};
-    const quoteChange = firstNumeric(quote.ch, quote.change, quote.netChange);
-    const quoteChangePct = firstNumeric(quote.chp, quote.changePercent, row.dayPct);
-    const qty = Math.abs(Number(row.quantity || 0));
-    const current = Number(row.current || 0);
-
-    const derivedDayPnl = quoteChange !== null
-      ? quoteChange * qty
-      : quoteChangePct !== null && current
-        ? current * (quoteChangePct / 100)
-        : null;
-
-    return {
-      ...row,
-      dayPnl: derivedDayPnl,
-      dayPct: row.dayPct ?? quoteChangePct,
-    };
-  }), [activeRows, portfolioQuotes]);
-
-  const summary = useMemo(() => summarizePortfolioRows(rowsWithLiveDayPnl), [rowsWithLiveDayPnl]);
+  const rowsWithLiveDayPnl = useMemo(() => hydratePortfolioRowsWithLiveDayPnl(activeRows, portfolioQuotes), [activeRows, portfolioQuotes]);
   const gainersCount = activeRows.filter((row) => row.totalPnl > 0).length;
   const losersCount = activeRows.filter((row) => row.totalPnl < 0).length;
   const activeRowsCount = activeRows.length;
@@ -1256,29 +1403,6 @@ function PortfolioTabbedSection({ holdings, positions, trades }) {
         <HistoricalPnlHeatmap trades={trades} />
       ) : (
       <>
-          <div className="portfolio-summary-strip">
-            <div className="portfolio-summary-item">
-              <span className="portfolio-summary-label">Invested</span>
-              <strong className="portfolio-summary-value">{formatCompactCurrency(summary.invested)}</strong>
-            </div>
-            <div className="portfolio-summary-item">
-              <span className="portfolio-summary-label">Current</span>
-              <strong className="portfolio-summary-value">{formatCompactCurrency(summary.current)}</strong>
-            </div>
-            <div className="portfolio-summary-item">
-              <span className="portfolio-summary-label">Today&apos;s P&amp;L</span>
-              <strong className={`portfolio-summary-value ${valueToneClass(summary.dayPnl)}`}>
-                {summary.dayPnl === null ? "--" : `${formatSignedCurrency(summary.dayPnl, true)} (${formatSignedPercent(summary.dayPct)})`}
-              </strong>
-            </div>
-            <div className="portfolio-summary-item">
-              <span className="portfolio-summary-label">Total P&amp;L</span>
-              <strong className={`portfolio-summary-value ${valueToneClass(summary.totalPnl)}`}>
-                {`${formatSignedCurrency(summary.totalPnl, true)} (${formatSignedPercent(summary.totalPnlPct)})`}
-              </strong>
-            </div>
-          </div>
-
           <div className="portfolio-filter-row">
             <div className="portfolio-pill-group">
               <button type="button" className={`portfolio-pill${performanceTab === "all" ? " active" : ""}`} onClick={() => setPerformanceTab("all")}>All({activeRowsCount})</button>
@@ -1449,6 +1573,9 @@ function loadStoredSettings() {
     }
     const merged = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
     merged.liveUpdatesEnabled = true;
+    merged.defaultChartSymbol = normalizeMarketIndexSymbol(merged.defaultChartSymbol);
+    merged.marketStartTime = normalizeTimeSetting(merged.marketStartTime, DEFAULT_MARKET_START_TIME);
+    merged.marketEndTime = normalizeTimeSetting(merged.marketEndTime, DEFAULT_MARKET_END_TIME);
     const watchlistSymbols = normalizeSymbols(merged.watchlistSymbols || "");
     if (watchlistSymbols.join(",") === LEGACY_HOME_SYMBOLS.join(",")) {
       merged.watchlistSymbols = HOME_MARKET_SYMBOLS.join(",");
@@ -1459,7 +1586,7 @@ function loadStoredSettings() {
   }
 }
 
-function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePage, pageSize }) {
+function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePage, pageSize, marketHoursActive }) {
   const [analyticsBySymbol, setAnalyticsBySymbol] = useState({});
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState("");
@@ -1720,6 +1847,11 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
     setLiveQuotesBySymbol({});
     setQuotesStreaming(false);
     void hydrateQuotes();
+
+    if (!marketHoursActive) {
+      return undefined;
+    }
+
     connect();
 
     return () => {
@@ -1731,7 +1863,7 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
         socket.close();
       }
     };
-  }, [pageSymbolsKey]);
+  }, [marketHoursActive, pageSymbolsKey]);
 
   return (
     <div className="table-panel nse-table-panel">
@@ -1873,6 +2005,7 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
 
 export default function App() {
   const location = useLocation();
+  const navigate = useNavigate();
   const homeMarketSymbolsCsv = HOME_MARKET_SYMBOLS.join(",");
   const [loading, setLoading] = useState(true);
   const [authenticating, setAuthenticating] = useState(false);
@@ -1911,9 +2044,14 @@ export default function App() {
   const [tradeSortState, setTradeSortState] = useState({ key: "symbol", direction: "asc" });
   const [watchlistDraft, setWatchlistDraft] = useState("");
   const [settings, setSettings] = useState(() => loadStoredSettings());
+  const [marketClock, setMarketClock] = useState(() => Date.now());
+  const [savedAccountProfile, setSavedAccountProfile] = useState(null);
   const [themeMode, setThemeMode] = useState(() => {
     try { return window.localStorage.getItem(THEME_KEY) || "light"; } catch { return "light"; }
   });
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const profileMenuRef = useRef(null);
+  const bootInitializeStartedRef = useRef(false);
   const screenerWarmupStartedRef = useRef(false);
   const [orderForm, setOrderForm] = useState({
     symbol: "NSE:SBIN-EQ",
@@ -1945,11 +2083,25 @@ export default function App() {
     });
     return HOME_MARKET_SYMBOLS.map((symbol) => rowMap.get(symbol) || { n: symbol, v: { symbol } });
   }, [watchlist]);
+  const marketHoursActive = useMemo(
+    () => isWithinMarketSession(settings.marketStartTime, settings.marketEndTime, marketClock),
+    [marketClock, settings.marketEndTime, settings.marketStartTime],
+  );
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", themeMode);
     try { window.localStorage.setItem(THEME_KEY, themeMode); } catch { /* noop */ }
   }, [themeMode]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setMarketClock(Date.now());
+    }, 15000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
 
   function toggleTheme() {
     setThemeMode((current) => (current === "dark" ? "light" : "dark"));
@@ -1991,6 +2143,10 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (bootInitializeStartedRef.current) {
+      return;
+    }
+
     const loginResult = search.get("login");
     if (loginResult === "error") {
       setError(search.get("reason") || "Login failed");
@@ -2010,22 +2166,79 @@ export default function App() {
     }
 
     if (loginResult === "success" && hasPendingLogin) {
+      bootInitializeStartedRef.current = true;
       clearPendingLogin();
       void initialize({ debugAuth: true, activateAccess: true });
       return;
     }
 
     if (hasStoredAccess) {
+      bootInitializeStartedRef.current = true;
       void initialize({ activateAccess: true });
       return;
     }
 
+    bootInitializeStartedRef.current = true;
     setLoading(false);
   }, []);
 
   useEffect(() => {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    setProfileMenuOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      setSavedAccountProfile(null);
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    fetchAccountProfile()
+      .then((result) => {
+        if (!cancelled) {
+          setSavedAccountProfile(result?.profile || null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSavedAccountProfile(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated]);
+
+  useEffect(() => {
+    function handleOutsideClick(event) {
+      if (profileMenuRef.current && !profileMenuRef.current.contains(event.target)) {
+        setProfileMenuOpen(false);
+      }
+    }
+
+    function handleEscape(event) {
+      if (event.key === "Escape") {
+        setProfileMenuOpen(false);
+      }
+    }
+
+    if (!profileMenuOpen) {
+      return undefined;
+    }
+
+    document.addEventListener("mousedown", handleOutsideClick);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [profileMenuOpen]);
 
   useEffect(() => {
     saveDailyAutoState(dailyAutoState);
@@ -2135,7 +2348,7 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!authenticated) {
+    if (!authenticated || !marketHoursActive) {
       setConnectionStatus("offline");
       return undefined;
     }
@@ -2157,13 +2370,14 @@ export default function App() {
 
       socket.onopen = () => {
         setConnectionStatus("live");
+        setError((current) => (current === "Live update failed" ? "" : current));
       };
 
       socket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.status === "error") {
-            setError(data.message || "Live update failed");
+            setConnectionStatus("reconnecting");
             return;
           }
           setDashboard(data);
@@ -2194,7 +2408,7 @@ export default function App() {
           });
           setWatchSeries((current) => [...current.slice(-39), watchPoint]);
         } catch (err) {
-          setError(err.message);
+          setConnectionStatus("reconnecting");
         }
       };
 
@@ -2221,11 +2435,11 @@ export default function App() {
         socket.close();
       }
     };
-  }, [authenticated, settings.reconnectSeconds, homeMarketSymbolsCsv]);
+  }, [authenticated, marketHoursActive, settings.reconnectSeconds, homeMarketSymbolsCsv]);
 
   // Fallback polling keeps dashboard/watchlist cards fresh when websocket is unavailable.
   useEffect(() => {
-    if (!authenticated) {
+    if (!authenticated || !marketHoursActive) {
       return undefined;
     }
 
@@ -2275,7 +2489,7 @@ export default function App() {
       window.clearInterval(quoteTimer);
       window.clearInterval(dashboardTimer);
     };
-  }, [authenticated, connectionStatus, location.pathname]);
+  }, [authenticated, connectionStatus, location.pathname, marketHoursActive]);
 
   useEffect(() => {
     if (!authenticated || !strategyAutoEnabled) {
@@ -2325,6 +2539,7 @@ export default function App() {
 
   async function initialize(options = {}) {
     const { debugAuth = false, activateAccess = false } = options;
+    let sessionAuthenticated = false;
     try {
       setLoading(true);
       setError("");
@@ -2332,9 +2547,10 @@ export default function App() {
         pushLoginDebug("Checking /api/session...");
       }
       const session = await fetchSession();
-      setAuthenticated(Boolean(session.authenticated));
+      sessionAuthenticated = Boolean(session.authenticated);
+      setAuthenticated(sessionAuthenticated);
       if (debugAuth) {
-        pushLoginDebug(`Session response: authenticated=${Boolean(session.authenticated)}${session.warning ? `, warning=${session.warning}` : ""}${session.message ? `, message=${session.message}` : ""}`);
+        pushLoginDebug(`Session response: authenticated=${sessionAuthenticated}${session.warning ? `, warning=${session.warning}` : ""}${session.message ? `, message=${session.message}` : ""}`);
       }
       if (!session.authenticated && session.message) {
         setError(session.message);
@@ -2342,7 +2558,7 @@ export default function App() {
       if (session.warning) {
         setError(session.warning);
       }
-      if (session.authenticated) {
+      if (sessionAuthenticated) {
         if (activateAccess) {
           grantAppAccess();
         }
@@ -2351,13 +2567,21 @@ export default function App() {
         if (debugAuth) {
           pushLoginDebug("Loading /api/dashboard...");
         }
-        const data = await fetchDashboard();
-        setDashboard(data);
-        if (debugAuth) {
-          pushLoginDebug("Dashboard loaded successfully.");
-        }
-        if (data?.profile?.s === "error" && data?.profile?.message) {
-          setError(data.profile.message);
+        try {
+          const data = await fetchDashboard();
+          setDashboard(data);
+          if (debugAuth) {
+            pushLoginDebug("Dashboard loaded successfully.");
+          }
+          if (data?.profile?.s === "error" && data?.profile?.message) {
+            setError(data.profile.message);
+          }
+        } catch (err) {
+          if (debugAuth) {
+            pushLoginDebug(`Dashboard load failed after session auth: ${err.message}`);
+            pushLoginDebug("Continuing with authenticated session; dashboard can be refreshed again after rate limits clear.");
+          }
+          setError(err.message);
         }
         return true;
       }
@@ -2369,7 +2593,7 @@ export default function App() {
       if (debugAuth) {
         pushLoginDebug(`Initialize failed: ${err.message}`);
       }
-      if (activateAccess) {
+      if (activateAccess && !sessionAuthenticated) {
         revokeAppAccess();
       }
       setError(err.message);
@@ -2377,7 +2601,7 @@ export default function App() {
       setLoading(false);
     }
 
-    return false;
+    return sessionAuthenticated;
   }
 
   async function refreshDashboard(silent = false) {
@@ -2466,6 +2690,10 @@ export default function App() {
     setWatchlistDraft(event.target.value);
   }
 
+  function handleAccountProfileSaved(nextProfile) {
+    setSavedAccountProfile(nextProfile || null);
+  }
+
   function addWatchlistSymbol() {
     const nextSymbol = watchlistDraft.trim();
     if (!nextSymbol) {
@@ -2539,6 +2767,7 @@ export default function App() {
 
   async function handleLogout() {
     setError("");
+    setProfileMenuOpen(false);
     try {
       await logout();
       setAuthenticated(false);
@@ -2588,6 +2817,61 @@ export default function App() {
   }), [trades, tradeSortState]);
   const watchlistSymbols = normalizeSymbols(settings.watchlistSymbols);
   const summary = dashboard?.summary || {};
+  const holdingPortfolioRows = useMemo(() => holdings.map(normalizeHoldingRow), [holdings]);
+  const positionPortfolioRows = useMemo(() => positions.map(normalizePositionRow), [positions]);
+  const portfolioBannerRows = useMemo(() => [...holdingPortfolioRows, ...positionPortfolioRows], [holdingPortfolioRows, positionPortfolioRows]);
+  const [portfolioBannerQuotes, setPortfolioBannerQuotes] = useState({});
+  const fundsAvailable = firstNumeric(
+    funds.equityAmount,
+    summary.available_balance,
+    summary.availableBalance,
+    funds.availableCash,
+    funds.balance,
+  ) ?? 0;
+  const livePortfolioBannerRows = useMemo(
+    () => hydratePortfolioRowsWithLiveDayPnl(portfolioBannerRows, portfolioBannerQuotes),
+    [portfolioBannerQuotes, portfolioBannerRows],
+  );
+  const portfolioBannerSummary = useMemo(
+    () => summarizePortfolioBreakdown(livePortfolioBannerRows, fundsAvailable),
+    [fundsAvailable, livePortfolioBannerRows],
+  );
+
+  useEffect(() => {
+    const symbols = [...new Set(portfolioBannerRows.map((row) => row.symbol).filter(Boolean))];
+    if (!symbols.length) {
+      setPortfolioBannerQuotes({});
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    fetchQuotes(symbols)
+      .then((data) => {
+        if (cancelled) {
+          return;
+        }
+
+        const nextQuotes = {};
+        (data.d || []).forEach((item) => {
+          const symbol = item.n || item.v?.symbol;
+          if (!symbol) {
+            return;
+          }
+          nextQuotes[symbol] = item.v || item;
+        });
+        setPortfolioBannerQuotes(nextQuotes);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPortfolioBannerQuotes({});
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [portfolioBannerRows]);
 
   if (loading) {
     return (
@@ -2686,23 +2970,24 @@ export default function App() {
     "/dashboard": "Home Page",
     "/portfolio": "Portfolio",
     "/markets":   "Markets & Watchlists",
+    "/alerts":    "Alerts & Streams",
     "/scanner":   "Command Deck",
     "/scanner/execution": "Execution",
     "/scanner/datasets":  "Analyst",
 
     "/orders":    "Orders & Trades",
     "/strategy":  "Strategy",
-    "/settings":  "Settings",
+    "/settings":  "Account",
   };
   const pageTitle = PAGE_TITLES[location.pathname] || "Home Page";
-
+  const showTopbarMarketStatus = true;
   const hour = new Date().getHours();
-  const greeting = hour < 12 ? "Good Morning" : hour < 17 ? "Good Afternoon" : "Good Evening";
   const brokerStreamReady = authenticated && connectionStatus === "live" && Boolean(dashboard);
 
   const MAIN_NAV_ITEMS = [
     { to: "/dashboard", label: "Home", Icon: IcoDashboard },
     { to: "/markets",   label: "Markets",    Icon: IcoMarkets },
+    { to: "/alerts",    label: "Alerts",     Icon: IcoBell },
     { to: "/scanner/datasets", label: "Analyst", Icon: IcoChart },
     { to: "/portfolio", label: "Portfolio",  Icon: IcoBriefcase },
     { to: "/orders",    label: "Orders",     Icon: IcoOrders },
@@ -2723,7 +3008,7 @@ export default function App() {
           <div className="na-brand-icon">TB</div>
           <div className="na-brand-text">
             <h2>TradeBuddy</h2>
-            <p>{profile.name || profile.display_name || "Trader"}</p>
+            <p>{profileDisplayName(profile)}</p>
           </div>
         </div>
 
@@ -2755,12 +3040,6 @@ export default function App() {
           ))}
         </nav>
 
-        <div className="na-sidebar-footer">
-          <button className="na-nav-item logout-item" style={{ width: "100%" }} title="Logout" onClick={handleLogout}>
-            <IcoLogout />
-            <span className="nav-label">Logout</span>
-          </button>
-        </div>
       </aside>
 
       {/* ── Main ── */}
@@ -2777,49 +3056,71 @@ export default function App() {
             <button className="theme-toggle-btn" title={themeMode === "dark" ? "Switch to light" : "Switch to dark"} onClick={toggleTheme}>
               {themeMode === "dark" ? <IcoSun /> : <IcoMoon />}
             </button>
-            <button className="btn-secondary" onClick={() => refreshDashboard()} disabled={refreshing}>
-              {refreshing ? "…" : "Refresh"}
+            <button
+              type="button"
+              className={`topbar-refresh-btn${refreshing ? " is-refreshing" : ""}`}
+              onClick={() => refreshDashboard()}
+              disabled={refreshing}
+              title={refreshing ? "Refreshing dashboard" : "Refresh dashboard"}
+              aria-label={refreshing ? "Refreshing dashboard" : "Refresh dashboard"}
+            >
+              <IcoRefresh />
             </button>
+            {showTopbarMarketStatus ? (
+              <button
+                type="button"
+                className={`topbar-market-pill${brokerStreamReady ? " is-live" : ""}${location.pathname === "/markets" ? " is-active" : ""}`}
+                onClick={() => navigate("/markets")}
+                title="Open live market"
+              >
+                Live Market
+              </button>
+            ) : null}
+            <div className="topbar-profile-shell" ref={profileMenuRef}>
+              <button
+                className={`topbar-profile-trigger topbar-profile-trigger-compact${profileMenuOpen ? " is-open" : ""}`}
+                type="button"
+                onClick={() => setProfileMenuOpen((current) => !current)}
+                aria-haspopup="menu"
+                aria-expanded={profileMenuOpen}
+                title="Open account menu"
+              >
+                <span className="topbar-profile-avatar">
+                  {savedAccountProfile?.avatarUrl ? (
+                    <img src={savedAccountProfile.avatarUrl} alt={profileDisplayName(profile)} />
+                  ) : profileInitials(profile)}
+                </span>
+              </button>
+
+              {profileMenuOpen ? (
+                <div className="topbar-profile-menu" role="menu" aria-label="Account menu">
+                  <div className="topbar-profile-menu-head">
+                    <strong>{profileDisplayName(profile)}</strong>
+                    <span>{profileSecondaryLabel(profile)}</span>
+                  </div>
+
+                  <button type="button" role="menuitem" className="topbar-profile-menu-item topbar-profile-menu-item-danger" onClick={handleLogout}>
+                    <IcoLogout />
+                    <span>Logout</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
         </header>
 
         {/* Page wrapper */}
         <div className="na-page">
+        <PortfolioOverviewBanner
+          breakdown={portfolioBannerSummary}
+          marketRows={homeMarketRows}
+        />
         <Suspense fallback={<PageLoader />}>
         <Routes>
           <Route
             path="/dashboard"
             element={(
               <>
-                {/* Greeting */}
-                <div className="greeting-banner">
-                  <div>
-                    <h2>{greeting}, {profile.name || profile.display_name || "Trader"}!</h2>
-                    <p>Stay updated with your portfolio&rsquo;s performance today.</p>
-                  </div>
-                  <span className={`greeting-tag${brokerStreamReady ? " is-live" : ""}`}>
-                    Live Market
-                  </span>
-                </div>
-
-                {/* Watchlist */}
-                <div className="watchlist-row">
-                  {homeMarketRows.map((item) => {
-                    const v = item.v || {};
-                    const chg = Number(v.chp ?? 0);
-                    const symbol = item.n || v.symbol;
-                    return (
-                      <div className="watch-card" key={item.n || v.symbol || Math.random()}>
-                        <div className="sym">{homeMarketLabel(symbol)}</div>
-                        <div className="ltp">{v.lp ?? "–"}</div>
-                        <div className={`chg ${chg >= 0 ? "up" : "dn"}`}>
-                          {chg >= 0 ? "▲" : "▼"} {Math.abs(chg).toFixed(2)}%
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
                 <DashboardMarketWorkbench
                   allStocksContent={(
                     <NseStocksTable
@@ -2829,6 +3130,7 @@ export default function App() {
                       nsePage={nsePage}
                       setNsePage={setNsePage}
                       pageSize={NSE_PAGE_SIZE}
+                      marketHoursActive={marketHoursActive}
                     />
                   )}
                 />
@@ -2994,7 +3296,8 @@ export default function App() {
             )}
           />
 
-          <Route path="/markets" element={<MarketsPage />} />
+          <Route path="/markets" element={<MarketsPage defaultChartSymbol={settings.defaultChartSymbol} marketHoursActive={marketHoursActive} />} />
+          <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/scanner" element={<ScannerLayout />}>
             <Route index element={<ScannerCommandDeck />} />
             <Route path="execution" element={<ScannerExecution />} />
@@ -3006,33 +3309,17 @@ export default function App() {
           <Route
             path="/settings"
             element={(
-              <div className="panel">
-                <div className="panel-head">
-                  <div><h3>Workspace Settings</h3><p>Persisted in your browser.</p></div>
-                </div>
-                <div className="form-grid">
-                  <label>
-                    Add Watchlist Symbol
-                    <div className="chip-input-row">
-                      <input value={watchlistDraft} onChange={handleWatchlistDraftChange} placeholder="e.g. NSE:SBIN-EQ" />
-                      <button type="button" className="btn-primary" onClick={addWatchlistSymbol}>Add</button>
-                    </div>
-                  </label>
-                  <div className="chip-list">
-                    {watchlistSymbols.map((s) => (
-                      <button key={s} type="button" className="chip" onClick={() => removeWatchlistSymbol(s)}>{s} ×</button>
-                    ))}
-                  </div>
-                  <div className="form-row-2">
-                    <label>Reconnect Seconds<input name="reconnectSeconds" type="number" min="1" value={settings.reconnectSeconds} onChange={handleSettingsChange} /></label>
-                    <label>Auto Strategy Interval (s)<input name="strategyAutoInterval" type="number" min="5" value={settings.strategyAutoInterval} onChange={handleSettingsChange} /></label>
-                  </div>
-                  <div className="form-row-2">
-                    <label>Max Auto Runs<input name="strategyAutoMaxRuns" type="number" min="1" value={settings.strategyAutoMaxRuns} onChange={handleSettingsChange} /></label>
-                    <label>Daily Strategy Cap<input name="strategyDailyCap" type="number" min="1" value={settings.strategyDailyCap} onChange={handleSettingsChange} /></label>
-                  </div>
-                </div>
-              </div>
+              <SettingsPage
+                profile={profile}
+                settings={settings}
+                watchlistDraft={watchlistDraft}
+                watchlistSymbols={watchlistSymbols}
+                onWatchlistDraftChange={handleWatchlistDraftChange}
+                onAddWatchlistSymbol={addWatchlistSymbol}
+                onRemoveWatchlistSymbol={removeWatchlistSymbol}
+                onSettingsChange={handleSettingsChange}
+                onAccountProfileSaved={handleAccountProfileSaved}
+              />
             )}
           />
 

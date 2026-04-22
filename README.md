@@ -1,24 +1,22 @@
-# TradeBuddy (FYERS Backend + React Dashboard)
+# TradeBuddy (Node Backend + React UI)
 
-Full-stack FYERS algo-trading starter with:
+TradeBuddy now runs as a Node.js stack end to end:
 
-- Automated FYERS auth using User ID + TOTP + PIN
-- Local token storage
-- Quote and historical data fetch commands
-- Live websocket market data stream command
-- React dashboard (portfolio landing page)
-- Login button that generates token from backend
+- Express backend for FYERS auth, quotes, history, orders, watchlists, analytics, and live websocket streaming
+- React + Vite frontend on `http://localhost:5100`
+- Node-based scanner service on `http://localhost:8001`
+- Main Node server that can also run in hosted mode to serve `frontend/dist` and mount both `/api` and `/scanner-api`
 
-## 1) Setup
+## Prerequisites
 
-```powershell
-cd d:/Fyers/tradebuddy
-python -m venv .venv
-.venv/Scripts/Activate.ps1
-pip install -r requirements.txt
+```text
+Node.js 22.x
+npm 10+
 ```
 
-Create `.env` from `.env.example` and fill values:
+## Environment
+
+Create `.env` from `.env.example` and fill these values:
 
 ```text
 FYERS_CLIENT_ID=...
@@ -35,15 +33,71 @@ FYERS_PAPER_TRADE_MODE=true
 FRONTEND_URL=http://localhost:5100
 ```
 
-The app login screen now requires the user to enter the 4-digit broker account PIN before login. `FYERS_PIN` remains optional and is only useful for non-interactive backend login automation outside the UI endpoint.
+Notes:
 
-Important: the same redirect URI must be configured in your FYERS app settings.
+- `FYERS_PIN` is optional for non-interactive flows. The UI login asks the user for the 4-digit broker PIN.
+- `FYERS_REDIRECT_URI` must match the FYERS app configuration exactly.
+- If you do not have a fixed outbound IP for live orders, set `FYERS_ENFORCE_STATIC_IP_CHECK=false` or keep paper trading enabled.
 
-## Hosted Deployment
+## Install
 
-This repository can now be deployed as a single Node entrypoint that serves the built React app, exposes the scanner routes, and proxies `/api/*` to the FYERS backend.
+```powershell
+npm install
+```
 
-Recommended hosting settings:
+## Local Development
+
+Run the full stack:
+
+```powershell
+npm run dev
+```
+
+This starts:
+
+- backend API on `http://localhost:5000`
+- scanner API on `http://localhost:8001`
+- frontend UI on `http://localhost:5100`
+
+Individual services:
+
+```powershell
+npm run dev:backend
+npm run dev:scanner
+npm run dev:frontend
+```
+
+## Runtime URLs
+
+- Frontend: `http://localhost:5100`
+- Backend health: `http://localhost:5000/api/health`
+- Scanner health: `http://localhost:8001/api/health`
+- Hosted health: `http://localhost:3000/health`
+
+The Vite frontend proxies:
+
+- `/api` -> `http://localhost:5000`
+- `/scanner-api` -> `http://localhost:8001`
+
+## Login Flow
+
+1. Open the frontend.
+2. Click **Login with FYERS**.
+3. Enter the 4-digit broker PIN when prompted.
+4. The backend attempts TOTP login automatically.
+5. If FYERS requires browser auth, the app redirects to the FYERS login page.
+6. After callback, the backend stores the token and returns to the UI.
+
+## Production / Hosted Mode
+
+Build and start the single hosted Node server:
+
+```powershell
+npm run build
+npm start
+```
+
+Recommended hosted settings:
 
 ```text
 Root directory: /
@@ -52,7 +106,18 @@ Start command: npm start
 Node version: 22.x
 ```
 
-Required environment variables for a deployed domain:
+## Hostinger Checklist
+
+Use these settings on Hostinger's Node.js plan:
+
+```text
+Application root: /
+Build command: npm install
+Start command: npm start
+Node version: 22.x
+```
+
+Required production environment values:
 
 ```text
 FRONTEND_URL=https://your-domain.example
@@ -60,186 +125,44 @@ FYERS_REDIRECT_URI=https://your-domain.example/api/auth/callback
 FYERS_PAPER_TRADE_MODE=true
 ```
 
-Python backend options:
+Important runtime notes:
 
-1. Same host, Python available:
-Set `PYTHON_AUTOSTART=true` or leave `PYTHON_API_BASE` unset. The Node server will try to start `server.py`.
+- Do not set `BACKEND_API_BASE` in hosted mode unless you intentionally want the scanner to call a different backend host. Leaving it unset lets `/scanner-api` reuse the same hosted Node process.
+- If Hostinger logs mention removed legacy bootstrap files, the platform is deploying an old snapshot or wrong root rather than the current Node-only app.
+- Clear Hostinger build cache or remove the old deployed app files before redeploying if stale logs persist.
+- Confirm the deployed root contains the current `package.json` where `postinstall` is `npm run build` and `start` is `node server.js --hosted`.
 
-2. Separate Python API service:
-Set `PYTHON_API_BASE=https://your-python-api.example` and optionally `SKIP_PYTHON_BOOTSTRAP=true`.
+Hosted runtime behavior:
 
-Static IP guard note:
+- serves `frontend/dist`
+- exposes backend routes under `/api/*`
+- exposes scanner routes under `/scanner-api/*`
+- exposes health on `/health`
 
-If your hosting plan does not provide a fixed outbound IP for live trading requests, either set a real value for `FYERS_ORDER_STATIC_IP` or disable the guard with `FYERS_ENFORCE_STATIC_IP_CHECK=false`. Paper mode does not require the static IP check anymore.
+Implementation note:
 
-## 2) Run Backend API
+- `npm start` now runs `node server.js --hosted`; the separate `hosting` folder is no longer used.
 
-```powershell
-python server.py
+Required environment overrides for a deployed domain:
+
+```text
+FRONTEND_URL=https://your-domain.example
+FYERS_REDIRECT_URI=https://your-domain.example/api/auth/callback
+FYERS_PAPER_TRADE_MODE=true
 ```
 
-This starts backend API on `http://localhost:5000`.
+## Features
 
-## 3) Run React UI
-
-```powershell
-cd frontend
-npm install
-npm run dev
-```
-
-Open `http://localhost:5100`.
-
-## 4) Run Both With One Command
-
-```powershell
-npm install
-npm run dev
-```
-
-This starts:
-- backend API on `http://localhost:5000`
-- frontend UI on `http://localhost:5100`
-
-## 5) Login Flow from UI
-
-1. Click **Login with FYERS**.
-2. Backend tries automatic TOTP login.
-3. If FYERS requires browser auth, backend redirects to FYERS login page.
-4. After FYERS callback, backend stores token and redirects back to React UI.
-5. Landing page shows portfolio dashboard data.
-6. Dashboard auto-refreshes every 10 seconds.
-7. Dashboard includes a live P&L pulse chart and guarded order panel.
-
-## 6) CLI Commands (Optional)
-
-```powershell
-python app.py auth
-```
-
-This stores token JSON at `FYERS_TOKEN_FILE`.
-
-Manual fallback flow (recommended when `auth` fails):
-
-1. Generate FYERS login URL:
-
-```powershell
-python app.py auth-url
-```
-
-2. Open the returned URL in browser, login, and copy callback URL.
-
-3. Exchange callback URL to token:
-
-```powershell
-python app.py auth-code --callback-url "https://127.0.0.1:5000/callback?auth_code=..."
-```
-
-You can also pass only auth code:
-
-```powershell
-python app.py auth-code --auth-code YOUR_AUTH_CODE
-```
-
-If FYERS login flow changes, you can import a manually generated token:
-
-```powershell
-python app.py import-token --access-token YOUR_ACCESS_TOKEN
-```
-
-## 7) Backend CLI Commands
-
-Get profile:
-
-```powershell
-python app.py profile
-```
-
-## 8) UI Features
-
-- Login button triggers backend token generation flow.
-- Portfolio dashboard shows funds, holdings, positions, and total live P&L.
-- Live P&L pulse chart updates from backend websocket feed.
-- Watchlist cards stream live quotes for key symbols.
-- Positions table shows current net positions.
-- Order panel places paper or live orders through backend static-IP and paper/live guards.
-- Strategy controls allow one-shot trigger-based execution directly from UI.
-- Logout button clears the local token and returns the app to login state.
-- Connection badge shows `live`, `connecting`, `reconnecting`, or `offline` websocket status.
-
-Get quotes:
-
-```powershell
-python app.py quotes NSE:SBIN-EQ NSE:RELIANCE-EQ
-```
-
-Get history:
-
-```powershell
-python app.py history NSE:SBIN-EQ --resolution 5 --start 2026-04-01 --end 2026-04-12
-```
-
-Start live stream:
-
-```powershell
-python app.py stream NSE:SBIN-EQ NSE:NIFTY50-INDEX
-```
-
-Check current public IP:
-
-```powershell
-python app.py public-ip
-```
-
-Place order (will be blocked if static IP does not match):
-
-```powershell
-python app.py place-order --symbol NSE:SBIN-EQ --qty 1 --side BUY --order-type MARKET --product-type INTRADAY
-```
-
-Run preflight checks before market hours:
-
-```powershell
-python app.py preflight
-```
-
-Force a live order when paper mode is enabled:
-
-```powershell
-python app.py place-order --symbol NSE:SBIN-EQ --qty 1 --side BUY --order-type MARKET --product-type INTRADAY --force-live
-```
-
-Run strategy with trigger and shared paper/live safety:
-
-```powershell
-python app.py strategy-run --symbol NSE:SBIN-EQ --qty 1 --side BUY --trigger-ltp 900 --product-type INTRADAY
-```
-
-Run strategy in live mode intentionally:
-
-```powershell
-python app.py strategy-run --symbol NSE:SBIN-EQ --qty 1 --side BUY --trigger-ltp 900 --product-type INTRADAY --force-live
-```
-
-Run looped strategy watcher with interval and execution caps:
-
-```powershell
-python app.py strategy-watch --symbol NSE:SBIN-EQ --qty 1 --side BUY --trigger-ltp 900 --poll-seconds 5 --max-trades 1 --max-checks 120
-```
-
-Live watcher mode (intentional):
-
-```powershell
-python app.py strategy-watch --symbol NSE:SBIN-EQ --qty 1 --side BUY --trigger-ltp 900 --poll-seconds 5 --max-trades 1 --max-checks 120 --force-live
-```
+- FYERS login with TOTP + PIN fallback flow
+- portfolio dashboard with holdings, positions, funds, orders, and trades
+- websocket quote streaming on `/api/live`
+- watchlist CRUD and smart/predefined watchlist catalog
+- symbol search, quotes, history, and technical analytics
+- direct screener datasets from the Node scanner service
+- guarded order placement with paper-trade and static-IP controls
 
 ## Notes
 
-- This is backend-only as requested (no UI).
-- You can now run backend and frontend together with a single `npm run dev` from project root.
+- The supported runtime and server code are Node-only.
+- Local app state is stored under `.tokens`, `.cache`, and `.data`.
 - Keep `.env` and token files private.
-- Order placement enforces static IP check by default using `FYERS_ORDER_STATIC_IP`.
-- `FYERS_PAPER_TRADE_MODE=true` prevents accidental live orders; use `--force-live` for intentional live execution.
-- `strategy-run` uses the same static IP and paper/live guard as `place-order`.
-- `strategy-watch` polls quotes repeatedly and stops after max checks or max trades.
-- If FYERS changes internal auth endpoints, update `tradebuddy/auth.py` accordingly.

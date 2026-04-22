@@ -6,7 +6,7 @@ async function request(path, options = {}) {
   try {
     return await fetch(`${API_BASE}${path}`, options);
   } catch {
-    throw new Error("Cannot reach the FYERS backend API. Ensure the backend is running on port 5000.");
+    throw new Error("Cannot reach the backend API. Ensure the Node server is running and reachable.");
   }
 }
 
@@ -28,7 +28,7 @@ async function parse(response) {
       throw new Error(data.message);
     }
     if (contentType.includes("text/html")) {
-      throw new Error(`FYERS backend returned HTML (${response.status}) instead of JSON. Ensure the Flask backend is running on port 5000.`);
+      throw new Error(`Backend returned HTML (${response.status}) instead of JSON. Ensure the Node server is running and reachable.`);
     }
     throw new Error(raw || `Request failed (${response.status})`);
   }
@@ -42,10 +42,10 @@ async function parse(response) {
   }
 
   if (contentType.includes("text/html")) {
-    throw new Error("FYERS backend returned HTML instead of JSON. Ensure the Flask backend is running on port 5000.");
+    throw new Error("Backend returned HTML instead of JSON. Ensure the Node server is running and reachable.");
   }
 
-  throw new Error("Received an invalid response from the FYERS backend.");
+  throw new Error("Received an invalid response from the backend API.");
 }
 
 export async function login(pin) {
@@ -72,6 +72,22 @@ export async function login(pin) {
 
 export async function fetchSession() {
   const response = await request(`/api/session`);
+  return parse(response);
+}
+
+export async function fetchAccountProfile() {
+  const response = await request(`/api/profile`);
+  return parse(response);
+}
+
+export async function saveAccountProfile(payload) {
+  const response = await request(`/api/profile`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
   return parse(response);
 }
 
@@ -164,6 +180,43 @@ export async function fetchWatchlists() {
 
 export async function fetchWatchlistCatalog() {
   const response = await request(`/api/watchlists/catalog`);
+  return parse(response);
+}
+
+export async function fetchPriceAlerts(archive = false) {
+  const response = await request(`/api/alerts/price${archive ? "?archive=1" : ""}`);
+  return parse(response);
+}
+
+export async function createPriceAlertRule(payload) {
+  const response = await request(`/api/alerts/price`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parse(response);
+}
+
+export async function updatePriceAlertRule(alertId, payload) {
+  const response = await request(`/api/alerts/price/${encodeURIComponent(alertId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parse(response);
+}
+
+export async function togglePriceAlertRule(alertId) {
+  const response = await request(`/api/alerts/price/${encodeURIComponent(alertId)}/toggle`, {
+    method: "PUT",
+  });
+  return parse(response);
+}
+
+export async function deletePriceAlertRule(alertId) {
+  const response = await request(`/api/alerts/price/${encodeURIComponent(alertId)}`, {
+    method: "DELETE",
+  });
   return parse(response);
 }
 
