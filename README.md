@@ -128,6 +128,8 @@ FYERS_PAPER_TRADE_MODE=true
 HOSTED_MODE=true
 ```
 
+`HOSTED_MODE=true` is the safest explicit setting for managed hosts. The server will also auto-enable hosted mode when the platform injects `PORT` and `frontend/dist/index.html` exists.
+
 Important runtime notes:
 
 - Do not set `BACKEND_API_BASE` in hosted mode unless you intentionally want the scanner to call a different backend host. Leaving it unset lets `/scanner-api` reuse the same hosted Node process.
@@ -146,6 +148,7 @@ Implementation note:
 
 - `npm start` now runs `node server.js --hosted`; the separate `hosting` folder is no longer used.
 - The root package no longer relies on npm workspaces; `npm run build` now uses a root `vite.config.js` that targets the nested `frontend/` app while keeping the Node server as the runtime entrypoint.
+- On managed Node hosts, the server also auto-switches into hosted mode when `PORT` is assigned and the built frontend is present, which avoids `Cannot GET /` if CLI flags are dropped by the platform.
 
 Required environment overrides for a deployed domain:
 

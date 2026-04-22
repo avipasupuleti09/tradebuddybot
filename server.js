@@ -15,7 +15,17 @@ function envFlag(name) {
   return ['1', 'true', 'yes', 'on'].includes(String(process.env[name] || '').trim().toLowerCase());
 }
 
-const hostedMode = process.argv.includes('--hosted') || envFlag('HOSTED_MODE');
+function shouldRunHostedMode() {
+  if (process.argv.includes('--hosted') || envFlag('HOSTED_MODE')) {
+    return true;
+  }
+
+  const platformPort = String(process.env.PORT || '').trim();
+  const backendPort = String(process.env.BACKEND_PORT || '').trim();
+  return Boolean(platformPort && !backendPort && fs.existsSync(path.join(distDir, 'index.html')));
+}
+
+const hostedMode = shouldRunHostedMode();
 const port = hostedMode
   ? Number(process.env.PORT || 3000)
   : Number(process.env.BACKEND_PORT || process.env.PORT || 5000);
