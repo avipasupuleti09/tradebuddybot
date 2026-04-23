@@ -16,7 +16,7 @@ import {
   normalizeMarketIndexSymbol,
 } from "./lib/marketIndexes";
 import { getNextSortState, sortRowsByAccessor } from "./lib/tableSort";
-import { NSE_STOCK_GROUP_OPTIONS, filterSymbolsByNseGroup, getNseGroupOption } from "./nseGroups";
+import { NSE_STOCK_GROUP_OPTIONS, filterTableSymbolsByNseGroup, getNseGroupOption } from "./nseGroups";
 
 const MarketsPage = lazy(() => import("./pages/MarketsPage"));
 const AlertsPage = lazy(() => import("./pages/AlertsPage"));
@@ -62,9 +62,20 @@ const AUTO_CAP_KEY = "tradebuddy-auto-cap";
 const APP_LOGIN_KEY = "tradebuddy-app-login";
 const PENDING_LOGIN_KEY = "tradebuddy-login-pending";
 const HOME_MARKET_SYMBOLS = MARKET_INDEX_SYMBOLS;
-const DEFAULT_MARKET_START_TIME = "09:15";
-const DEFAULT_MARKET_END_TIME = "15:30";
+const MARKET_TIME_ZONE = "Asia/Kolkata";
+const MARKET_TIME_ZONE_LABEL = "IST";
+const EMPTY_LIST = [];
+const LEGACY_MARKET_START_TIME = "09:15";
+const LEGACY_MARKET_END_TIME = "15:30";
+const DEFAULT_MARKET_START_TIME = "09:00";
+const DEFAULT_MARKET_END_TIME = "15:45";
 const TIME_VALUE_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+const MARKET_TIME_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  timeZone: MARKET_TIME_ZONE,
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
 const LEGACY_HOME_SYMBOLS = [
   "NSE:NIFTY50-INDEX",
   "NSE:NIFTYBANK-INDEX",
@@ -94,11 +105,19 @@ function timeSettingToMinutes(value) {
   return (hours * 60) + minutes;
 }
 
-function isWithinMarketSession(startTime, endTime, nowValue = Date.now()) {
+function marketTimeToMinutes(nowValue = Date.now()) {
   const currentDate = nowValue instanceof Date ? nowValue : new Date(nowValue);
+  const hourPart = MARKET_TIME_FORMATTER.formatToParts(currentDate).find((part) => part.type === "hour");
+  const minutePart = MARKET_TIME_FORMATTER.formatToParts(currentDate).find((part) => part.type === "minute");
+  const hours = Number(hourPart?.value || 0);
+  const minutes = Number(minutePart?.value || 0);
+  return (hours * 60) + minutes;
+}
+
+function isWithinMarketSession(startTime, endTime, nowValue = Date.now()) {
   const startMinutes = timeSettingToMinutes(normalizeTimeSetting(startTime, DEFAULT_MARKET_START_TIME));
   const endMinutes = timeSettingToMinutes(normalizeTimeSetting(endTime, DEFAULT_MARKET_END_TIME));
-  const currentMinutes = (currentDate.getHours() * 60) + currentDate.getMinutes();
+  const currentMinutes = marketTimeToMinutes(nowValue);
 
   if (startMinutes === endMinutes) {
     return true;
@@ -109,6 +128,10 @@ function isWithinMarketSession(startTime, endTime, nowValue = Date.now()) {
   }
 
   return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+}
+
+function formatLiveWindow(startTime, endTime) {
+  return `${normalizeTimeSetting(startTime, DEFAULT_MARKET_START_TIME)} - ${normalizeTimeSetting(endTime, DEFAULT_MARKET_END_TIME)}`;
 }
 
 const CHART_COLORS = ["#5d87ff", "#13deb9", "#ffae1f", "#fa896b", "#7460ee", "#2a3547"];
@@ -465,26 +488,44 @@ function summarizePortfolioRows(rows) {
 
 function hydratePortfolioRowsWithLiveDayPnl(rows, portfolioQuotes = {}) {
   return rows.map((row) => {
-    if (row.dayPnl !== null && row.dayPnl !== undefined) {
+    const quote = portfolioQuotes[row.symbol] || {};
+    const liveLtp = firstNumeric(quote.lp, quote.ltp, quote.lastPrice);
+    const quoteChange = firstNumeric(quote.ch, quote.change, quote.netChange);
+    const quoteChangePct = firstNumeric(quote.chp, quote.changePercent, row.dayPct);
+
+    if (liveLtp === null && quoteChange === null && quoteChangePct === null) {
       return row;
     }
 
-    const quote = portfolioQuotes[row.symbol] || {};
-    const quoteChange = firstNumeric(quote.ch, quote.change, quote.netChange);
-    const quoteChangePct = firstNumeric(quote.chp, quote.changePercent, row.dayPct);
-    const qty = Math.abs(Number(row.quantity || 0));
-    const current = Number(row.current || 0);
+    const quantity = Number(row.quantity || 0);
+    const absoluteQty = Math.abs(quantity);
+    const invested = Number(row.invested || 0);
+    const liveCurrent = liveLtp !== null ? absoluteQty * liveLtp : Number(row.current || 0);
+
+    let liveTotalPnl = Number(row.totalPnl || 0);
+    if (liveLtp !== null && absoluteQty > 0) {
+      const avgCost = Number(row.buyAvg || 0);
+      liveTotalPnl = quantity < 0
+        ? (avgCost - liveLtp) * absoluteQty
+        : (liveLtp - avgCost) * absoluteQty;
+    } else if (invested) {
+      liveTotalPnl = liveCurrent - invested;
+    }
 
     const derivedDayPnl = quoteChange !== null
-      ? quoteChange * qty
-      : quoteChangePct !== null && current
-        ? current * (quoteChangePct / 100)
-        : null;
+      ? quoteChange * absoluteQty
+      : quoteChangePct !== null && liveCurrent
+        ? liveCurrent * (quoteChangePct / 100)
+        : row.dayPnl;
 
     return {
       ...row,
+      ltp: liveLtp ?? row.ltp,
+      current: liveCurrent,
+      totalPnl: liveTotalPnl,
+      totalPnlPct: invested ? (liveTotalPnl / invested) * 100 : 0,
       dayPnl: derivedDayPnl,
-      dayPct: row.dayPct ?? quoteChangePct,
+      dayPct: quoteChangePct ?? row.dayPct,
     };
   });
 }
@@ -1075,15 +1116,20 @@ function PortfolioOverviewBanner({ breakdown, marketRows = [] }) {
             const value = item.v || {};
             const changePercent = Number(value.chp ?? 0);
             const symbol = item.n || value.symbol;
+            const trendDirection = changePercent > 0 ? "up" : changePercent < 0 ? "dn" : "flat";
+            const trendPrefix = changePercent > 0 ? "+" : changePercent < 0 ? "-" : "";
 
             return (
               <div className="watch-card" key={item.n || value.symbol || symbol}>
-                <div className="sym">{homeMarketLabel(symbol)}</div>
+                <div className="watch-card-head">
+                  <div className="sym">{homeMarketLabel(symbol)}</div>
+                  <div className={`watch-card-arrow-badge watch-card-arrow-badge-${trendDirection}`} title={`Change ${trendPrefix}${Math.abs(changePercent).toFixed(2)}%`}>
+                    <HomeMarketTrendArrow direction={trendDirection} />
+                  </div>
+                </div>
                 <div className="watch-card-metrics">
                   <div className="ltp">{value.lp ?? "–"}</div>
-                  <div className={`chg ${changePercent >= 0 ? "up" : "dn"}`}>
-                    {changePercent >= 0 ? "▲" : "▼"} {Math.abs(changePercent).toFixed(2)}%
-                  </div>
+                  <div className={`watch-card-trend-value watch-card-trend-value-${trendDirection}`}>{trendPrefix}{Math.abs(changePercent).toFixed(2)}%</div>
                 </div>
               </div>
             );
@@ -1094,16 +1140,43 @@ function PortfolioOverviewBanner({ breakdown, marketRows = [] }) {
   );
 }
 
-function SmartChartsBoard({ pnlSeries, holdings }) {
+function HomeMarketTrendArrow({ direction }) {
+  if (direction === "flat") {
+    return (
+      <span className="watch-card-trend-arrow watch-card-trend-arrow-flat" aria-hidden="true">
+        <svg className="watch-card-trend-arrow-svg" viewBox="0 0 32 32" focusable="false">
+          <rect className="watch-card-trend-arrow-core" x="7" y="14" width="18" height="4" rx="2" />
+        </svg>
+      </span>
+    );
+  }
+
+  return (
+    <span className={`watch-card-trend-arrow watch-card-trend-arrow-${direction}`} aria-hidden="true">
+      <svg className="watch-card-trend-arrow-svg" viewBox="0 0 32 32" focusable="false">
+        <path
+          className="watch-card-trend-arrow-core"
+          d="M16 4L25 13H20V28H12V13H7L16 4Z"
+        />
+        <path
+          className="watch-card-trend-arrow-accent"
+          d="M16 7L22 13H18V26H14V13H10L16 7Z"
+        />
+      </svg>
+    </span>
+  );
+}
+
+function SmartChartsBoard({ pnlSeries, holdings, streamStatusText }) {
   const isDarkTheme = document.documentElement.getAttribute("data-theme") === "dark";
   const gridStroke = isDarkTheme ? "rgba(149, 184, 235, 0.28)" : "#e7e2f7";
   const axisColor = isDarkTheme ? "#94aed1" : "#6c7c95";
 
   const allocation = holdings
     .map((item) => {
-      const value = Number(item.marketVal ?? Number(item.quantity || 0) * Number(item.ltp || 0));
+      const value = Number(item.current ?? item.marketVal ?? Number(item.quantity || 0) * Number(item.ltp || 0));
       return {
-        name: item.symbol,
+        name: item.displaySymbol || item.symbol,
         value,
       };
     })
@@ -1113,8 +1186,8 @@ function SmartChartsBoard({ pnlSeries, holdings }) {
 
   const topPnl = holdings
     .map((item) => ({
-      symbol: item.symbol,
-      pnl: Number(item.pnl || 0),
+      symbol: item.displaySymbol || item.symbol,
+      pnl: Number(item.totalPnl ?? item.pnl ?? 0),
     }))
     .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl))
     .slice(0, 6);
@@ -1130,7 +1203,7 @@ function SmartChartsBoard({ pnlSeries, holdings }) {
         <div className="section-head">
           <div>
             <h2>Portfolio P&amp;L Trend</h2>
-            <p>Streaming over websocket.</p>
+            <p>{streamStatusText}</p>
           </div>
         </div>
         <div className="chart-box">
@@ -1278,55 +1351,21 @@ function SmartChartsBoard({ pnlSeries, holdings }) {
   );
 }
 
-function PortfolioTabbedSection({ holdings, positions, trades }) {
+function PortfolioTabbedSection({ holdingRows = [], positionRows = [], trades }) {
   const [primaryTab, setPrimaryTab] = useState("holdings");
   const [performanceTab, setPerformanceTab] = useState("all");
   const [query, setQuery] = useState("");
-  const [portfolioQuotes, setPortfolioQuotes] = useState({});
   const [portfolioSortState, setPortfolioSortState] = useState({ key: "symbol", direction: "asc" });
 
-  const holdingRows = useMemo(() => holdings.map(normalizeHoldingRow), [holdings]);
-  const positionRows = useMemo(() => positions.map(normalizePositionRow), [positions]);
   const activeRows = primaryTab === "holdings" ? holdingRows : positionRows;
-  const rowsWithLiveDayPnl = useMemo(() => hydratePortfolioRowsWithLiveDayPnl(activeRows, portfolioQuotes), [activeRows, portfolioQuotes]);
   const gainersCount = activeRows.filter((row) => row.totalPnl > 0).length;
   const losersCount = activeRows.filter((row) => row.totalPnl < 0).length;
   const activeRowsCount = activeRows.length;
   const gainersShare = activeRowsCount ? (gainersCount / activeRowsCount) * 100 : 0;
   const losersShare = activeRowsCount ? (losersCount / activeRowsCount) * 100 : 0;
 
-  useEffect(() => {
-    const symbols = [...new Set(activeRows.map((row) => row.symbol).filter(Boolean))];
-    if (!symbols.length) {
-      setPortfolioQuotes({});
-      return undefined;
-    }
-
-    let cancelled = false;
-    fetchQuotes(symbols)
-      .then((data) => {
-        if (cancelled) return;
-        const next = {};
-        (data.d || []).forEach((item) => {
-          const sym = item.n || item.v?.symbol;
-          if (!sym) return;
-          next[sym] = item.v || item;
-        });
-        setPortfolioQuotes(next);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setPortfolioQuotes({});
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeRows]);
-
   const filteredRows = useMemo(() => {
-    let rows = rowsWithLiveDayPnl;
+    let rows = activeRows;
     if (performanceTab === "gainers") {
       rows = rows.filter((row) => row.totalPnl > 0);
     } else if (performanceTab === "losers") {
@@ -1344,7 +1383,7 @@ function PortfolioTabbedSection({ holdings, positions, trades }) {
       || row.exchange.toUpperCase().includes(normalizedQuery)
       || (row.sideLabel || "").toUpperCase().includes(normalizedQuery)
     ));
-  }, [rowsWithLiveDayPnl, performanceTab, query]);
+  }, [activeRows, performanceTab, query]);
 
   const sortedRows = useMemo(() => sortRowsByAccessor(filteredRows, portfolioSortState, {
     symbol: (row) => row.displaySymbol,
@@ -1571,11 +1610,18 @@ function loadStoredSettings() {
     if (!raw) {
       return DEFAULT_SETTINGS;
     }
-    const merged = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    const storedSettings = JSON.parse(raw);
+    const merged = { ...DEFAULT_SETTINGS, ...storedSettings };
     merged.liveUpdatesEnabled = true;
     merged.defaultChartSymbol = normalizeMarketIndexSymbol(merged.defaultChartSymbol);
-    merged.marketStartTime = normalizeTimeSetting(merged.marketStartTime, DEFAULT_MARKET_START_TIME);
-    merged.marketEndTime = normalizeTimeSetting(merged.marketEndTime, DEFAULT_MARKET_END_TIME);
+    const useUpdatedDefaultWindow = storedSettings?.marketStartTime === LEGACY_MARKET_START_TIME
+      && storedSettings?.marketEndTime === LEGACY_MARKET_END_TIME;
+    merged.marketStartTime = useUpdatedDefaultWindow
+      ? DEFAULT_MARKET_START_TIME
+      : normalizeTimeSetting(merged.marketStartTime, DEFAULT_MARKET_START_TIME);
+    merged.marketEndTime = useUpdatedDefaultWindow
+      ? DEFAULT_MARKET_END_TIME
+      : normalizeTimeSetting(merged.marketEndTime, DEFAULT_MARKET_END_TIME);
     const watchlistSymbols = normalizeSymbols(merged.watchlistSymbols || "");
     if (watchlistSymbols.join(",") === LEGACY_HOME_SYMBOLS.join(",")) {
       merged.watchlistSymbols = HOME_MARKET_SYMBOLS.join(",");
@@ -1584,6 +1630,69 @@ function loadStoredSettings() {
   } catch {
     return DEFAULT_SETTINGS;
   }
+}
+
+function mergeLiveQuoteIntoRows(rows, quote, preferredSymbols = []) {
+  const symbol = quote?.symbol || quote?.n || quote?.v?.symbol;
+  if (!symbol) {
+    return rows;
+  }
+
+  const normalizedQuote = {
+    ...quote,
+    symbol,
+    lp: quote?.lp ?? quote?.ltp,
+    ltp: quote?.ltp ?? quote?.lp,
+    volume: quote?.volume ?? quote?.vol_traded_today,
+  };
+
+  const rowMap = new Map();
+  rows.forEach((item) => {
+    const key = item?.n || item?.v?.symbol;
+    if (key) {
+      rowMap.set(key, item);
+    }
+  });
+
+  const currentRow = rowMap.get(symbol) || { n: symbol, s: "ok", v: { symbol } };
+  rowMap.set(symbol, {
+    ...currentRow,
+    n: symbol,
+    s: "ok",
+    v: {
+      ...(currentRow.v || {}),
+      ...normalizedQuote,
+      symbol,
+    },
+  });
+
+  return preferredSymbols.map((preferredSymbol) => (
+    rowMap.get(preferredSymbol) || { n: preferredSymbol, v: { symbol: preferredSymbol } }
+  ));
+}
+
+function mergeLiveQuoteIntoMap(quotes, quote) {
+  const symbol = quote?.symbol || quote?.n || quote?.v?.symbol;
+  if (!symbol) {
+    return quotes;
+  }
+
+  const normalizedQuote = {
+    ...quote,
+    symbol,
+    lp: quote?.lp ?? quote?.ltp,
+    ltp: quote?.ltp ?? quote?.lp,
+    volume: quote?.volume ?? quote?.vol_traded_today,
+  };
+
+  return {
+    ...quotes,
+    [symbol]: {
+      ...(quotes[symbol] || {}),
+      ...normalizedQuote,
+      symbol,
+    },
+  };
 }
 
 function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePage, pageSize, marketHoursActive }) {
@@ -1601,7 +1710,7 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
 
   const activeGroup = useMemo(() => getNseGroupOption(activeGroupId), [activeGroupId]);
   const groupFilteredSymbols = useMemo(
-    () => filterSymbolsByNseGroup(nseSymbols, activeGroupId),
+    () => filterTableSymbolsByNseGroup(nseSymbols, activeGroupId),
     [nseSymbols, activeGroupId],
   );
 
@@ -1685,7 +1794,14 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
     signal: (row) => row.analytics?.signal,
     signalReason: (row) => row.analytics?.signalNote,
   }), [pageRowsWithLiveData, sortState]);
-  const showTableHeaderStatus = Boolean(analyticsError || analyticsLoading);
+  const liveTableStatusMessage = !pageRows.length
+    ? ""
+    : !marketHoursActive
+      ? "Live quotes are paused outside the configured market window."
+      : quotesStreaming
+        ? ""
+        : "Live quotes are reconnecting for this table.";
+  const showTableHeaderStatus = Boolean(analyticsError || analyticsLoading || liveTableStatusMessage);
 
   function handleSort(key, defaultDirection) {
     setSortState((current) => getNextSortState(current, key, defaultDirection));
@@ -1746,6 +1862,7 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
     let cancelled = false;
     let socket;
     let reconnectTimer;
+    let hydrateTimer;
 
     const hydrateQuotes = async () => {
       try {
@@ -1754,12 +1871,9 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
           return;
         }
 
-        const nextQuotes = {};
+        let nextQuotes = {};
         (data.d || []).forEach((item) => {
-          const symbol = item.n || item.v?.symbol;
-          if (symbol) {
-            nextQuotes[symbol] = item.v || item;
-          }
+          nextQuotes = mergeLiveQuoteIntoMap(nextQuotes, item.v || item);
         });
 
         setLiveQuotesBySymbol(nextQuotes);
@@ -1812,13 +1926,7 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
             return;
           }
 
-          setLiveQuotesBySymbol((current) => ({
-            ...current,
-            [symbol]: {
-              ...(current[symbol] || {}),
-              ...payload.quote,
-            },
-          }));
+          setLiveQuotesBySymbol((current) => mergeLiveQuoteIntoMap(current, payload.quote));
           setDailyReferenceBySymbol((current) => {
             return {
               ...current,
@@ -1845,17 +1953,26 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
     };
 
     setLiveQuotesBySymbol({});
+    setDailyReferenceBySymbol({});
     setQuotesStreaming(false);
-    void hydrateQuotes();
 
     if (!marketHoursActive) {
       return undefined;
     }
 
+    hydrateTimer = window.setTimeout(() => {
+      if (!cancelled) {
+        void hydrateQuotes();
+      }
+    }, 1000);
+
     connect();
 
     return () => {
       cancelled = true;
+      if (hydrateTimer) {
+        window.clearTimeout(hydrateTimer);
+      }
       if (reconnectTimer) {
         window.clearTimeout(reconnectTimer);
       }
@@ -1872,6 +1989,7 @@ function NseStocksTable({ nseSymbols, nseFilter, setNseFilter, nsePage, setNsePa
           <div className="nse-table-panel-title">
             {analyticsError ? <p className="nse-table-status error-text">{analyticsError}</p> : null}
             {!analyticsError && analyticsLoading ? <p className="nse-table-status">Loading OHLC + signal analytics for this page...</p> : null}
+            {!analyticsError && !analyticsLoading && liveTableStatusMessage ? <p className="nse-table-status">{liveTableStatusMessage}</p> : null}
           </div>
         ) : null}
         <div className="nse-toolbar-controls">
@@ -2045,6 +2163,7 @@ export default function App() {
   const [watchlistDraft, setWatchlistDraft] = useState("");
   const [settings, setSettings] = useState(() => loadStoredSettings());
   const [marketClock, setMarketClock] = useState(() => Date.now());
+  const [liveMarketRefreshToken, setLiveMarketRefreshToken] = useState(0);
   const [savedAccountProfile, setSavedAccountProfile] = useState(null);
   const [themeMode, setThemeMode] = useState(() => {
     try { return window.localStorage.getItem(THEME_KEY) || "light"; } catch { return "light"; }
@@ -2081,11 +2200,17 @@ export default function App() {
         rowMap.set(symbol, item);
       }
     });
-    return HOME_MARKET_SYMBOLS.map((symbol) => rowMap.get(symbol) || { n: symbol, v: { symbol } });
+    return HOME_MARKET_SYMBOLS
+      .filter((symbol) => symbol !== "NSE:INDIAVIX-INDEX")
+      .map((symbol) => rowMap.get(symbol) || { n: symbol, v: { symbol } });
   }, [watchlist]);
   const marketHoursActive = useMemo(
     () => isWithinMarketSession(settings.marketStartTime, settings.marketEndTime, marketClock),
     [marketClock, settings.marketEndTime, settings.marketStartTime],
+  );
+  const marketWindowLabel = useMemo(
+    () => formatLiveWindow(settings.marketStartTime, settings.marketEndTime),
+    [settings.marketEndTime, settings.marketStartTime],
   );
 
   useEffect(() => {
@@ -2096,7 +2221,7 @@ export default function App() {
   useEffect(() => {
     const timer = window.setInterval(() => {
       setMarketClock(Date.now());
-    }, 15000);
+    }, 5000);
 
     return () => {
       window.clearInterval(timer);
@@ -2323,16 +2448,40 @@ export default function App() {
     }
 
     let cancelled = false;
-    fetchQuotes(HOME_MARKET_SYMBOLS)
-      .then((data) => {
+    let loadTimer;
+    let retryTimer;
+
+    const loadHomeMarketSnapshot = async (attempt = 0) => {
+      try {
+        const data = await fetchQuotes(HOME_MARKET_SYMBOLS);
         if (!cancelled) {
           setWatchlist(data.d || []);
         }
-      })
-      .catch(() => {});
+      } catch {
+        if (!cancelled && attempt === 0) {
+          retryTimer = window.setTimeout(() => {
+            if (!cancelled) {
+              void loadHomeMarketSnapshot(1);
+            }
+          }, 1500);
+        }
+      }
+    };
+
+    loadTimer = window.setTimeout(() => {
+      if (!cancelled) {
+        void loadHomeMarketSnapshot();
+      }
+    }, 1000);
 
     return () => {
       cancelled = true;
+      if (loadTimer) {
+        window.clearTimeout(loadTimer);
+      }
+      if (retryTimer) {
+        window.clearTimeout(retryTimer);
+      }
     };
   }, [authenticated]);
 
@@ -2366,7 +2515,7 @@ export default function App() {
       const wsBase = API_BASE
         ? API_BASE.replace("http://", "ws://").replace("https://", "wss://")
         : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
-      socket = new WebSocket(`${wsBase}/api/live?symbols=${encodeURIComponent(homeMarketSymbolsCsv)}`);
+      socket = new WebSocket(`${wsBase}/api/live?mode=quotes&symbols=${encodeURIComponent(homeMarketSymbolsCsv)}`);
 
       socket.onopen = () => {
         setConnectionStatus("live");
@@ -2376,37 +2525,15 @@ export default function App() {
       socket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.status === "error") {
+          if (data.status === "error" || data.type === "error") {
             setConnectionStatus("reconnecting");
             return;
           }
-          setDashboard(data);
-          const rows = data.watchlist?.d || [];
-          setWatchlist(rows);
+          if (data.type !== "quote" || !data.quote) {
+            return;
+          }
 
-          const timeLabel = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-          const summary = data.summary || {};
-          setPnlSeries((current) => {
-            const next = [
-              ...current.slice(-39),
-              {
-                time: timeLabel,
-                total: Number(summary.total_pnl || 0),
-                holdings: Number(summary.holdings_pnl || 0),
-                positions: Number(summary.positions_pnl || 0),
-              },
-            ];
-            return next;
-          });
-
-          const watchPoint = { time: timeLabel };
-          rows.slice(0, 4).forEach((row) => {
-            const key = row.n || row.v?.symbol;
-            if (key) {
-              watchPoint[key] = Number(row.v?.lp || 0);
-            }
-          });
-          setWatchSeries((current) => [...current.slice(-39), watchPoint]);
+          setWatchlist((current) => mergeLiveQuoteIntoRows(current, data.quote, HOME_MARKET_SYMBOLS));
         } catch (err) {
           setConnectionStatus("reconnecting");
         }
@@ -2460,7 +2587,7 @@ export default function App() {
     };
 
     const pollDashboard = async () => {
-      if (cancelled || connectionStatus === "live" || location.pathname !== "/portfolio") {
+      if (cancelled || location.pathname !== "/portfolio") {
         return;
       }
       try {
@@ -2564,25 +2691,27 @@ export default function App() {
         }
         setBrokerPin("");
         setShowBrokerPin(false);
+        setLoading(false);
         if (debugAuth) {
           pushLoginDebug("Loading /api/dashboard...");
         }
-        try {
-          const data = await fetchDashboard();
-          setDashboard(data);
-          if (debugAuth) {
-            pushLoginDebug("Dashboard loaded successfully.");
-          }
-          if (data?.profile?.s === "error" && data?.profile?.message) {
-            setError(data.profile.message);
-          }
-        } catch (err) {
-          if (debugAuth) {
-            pushLoginDebug(`Dashboard load failed after session auth: ${err.message}`);
-            pushLoginDebug("Continuing with authenticated session; dashboard can be refreshed again after rate limits clear.");
-          }
-          setError(err.message);
-        }
+        void fetchDashboard()
+          .then((data) => {
+            setDashboard(data);
+            if (debugAuth) {
+              pushLoginDebug("Dashboard loaded successfully.");
+            }
+            if (data?.profile?.s === "error" && data?.profile?.message) {
+              setError(data.profile.message);
+            }
+          })
+          .catch((err) => {
+            if (debugAuth) {
+              pushLoginDebug(`Dashboard load failed after session auth: ${err.message}`);
+              pushLoginDebug("Continuing with authenticated session; dashboard can be refreshed again after rate limits clear.");
+            }
+            setError(err.message);
+          });
         return true;
       }
 
@@ -2797,10 +2926,10 @@ export default function App() {
 
   const profile = dashboard?.profile?.data || {};
   const funds = dashboard?.funds?.fund_limit?.[0] || {};
-  const holdings = dashboard?.holdings?.holdings || [];
-  const positions = dashboard?.positions?.netPositions || [];
-  const orders = dashboard?.orderbook?.orderBook || dashboard?.orderbook?.orderbook || [];
-  const trades = dashboard?.tradebook?.tradeBook || dashboard?.tradebook?.tradebook || [];
+  const holdings = dashboard?.holdings?.holdings ?? EMPTY_LIST;
+  const positions = dashboard?.positions?.netPositions ?? EMPTY_LIST;
+  const orders = dashboard?.orderbook?.orderBook ?? dashboard?.orderbook?.orderbook ?? EMPTY_LIST;
+  const trades = dashboard?.tradebook?.tradeBook ?? dashboard?.tradebook?.tradebook ?? EMPTY_LIST;
   const sortedOrders = useMemo(() => sortRowsByAccessor(orders, orderSortState, {
     symbol: (row) => row.symbol,
     qty: (row) => row.qty ?? row.orderQty,
@@ -2828,19 +2957,36 @@ export default function App() {
     funds.availableCash,
     funds.balance,
   ) ?? 0;
+  const liveHoldingPortfolioRows = useMemo(
+    () => hydratePortfolioRowsWithLiveDayPnl(holdingPortfolioRows, portfolioBannerQuotes),
+    [holdingPortfolioRows, portfolioBannerQuotes],
+  );
+  const livePositionPortfolioRows = useMemo(
+    () => hydratePortfolioRowsWithLiveDayPnl(positionPortfolioRows, portfolioBannerQuotes),
+    [positionPortfolioRows, portfolioBannerQuotes],
+  );
   const livePortfolioBannerRows = useMemo(
-    () => hydratePortfolioRowsWithLiveDayPnl(portfolioBannerRows, portfolioBannerQuotes),
-    [portfolioBannerQuotes, portfolioBannerRows],
+    () => [...liveHoldingPortfolioRows, ...livePositionPortfolioRows],
+    [liveHoldingPortfolioRows, livePositionPortfolioRows],
   );
   const portfolioBannerSummary = useMemo(
     () => summarizePortfolioBreakdown(livePortfolioBannerRows, fundsAvailable),
     [fundsAvailable, livePortfolioBannerRows],
   );
+  const portfolioBannerSymbolKey = useMemo(
+    () => [...new Set(portfolioBannerRows.map((row) => row.symbol).filter(Boolean))].join(","),
+    [portfolioBannerRows],
+  );
 
   useEffect(() => {
     const symbols = [...new Set(portfolioBannerRows.map((row) => row.symbol).filter(Boolean))];
     if (!symbols.length) {
-      setPortfolioBannerQuotes({});
+      setPortfolioBannerQuotes((current) => (Object.keys(current).length ? {} : current));
+      return undefined;
+    }
+
+    if (!marketHoursActive) {
+      setPortfolioBannerQuotes((current) => (Object.keys(current).length ? {} : current));
       return undefined;
     }
 
@@ -2852,13 +2998,9 @@ export default function App() {
           return;
         }
 
-        const nextQuotes = {};
+        let nextQuotes = {};
         (data.d || []).forEach((item) => {
-          const symbol = item.n || item.v?.symbol;
-          if (!symbol) {
-            return;
-          }
-          nextQuotes[symbol] = item.v || item;
+          nextQuotes = mergeLiveQuoteIntoMap(nextQuotes, item.v || item);
         });
         setPortfolioBannerQuotes(nextQuotes);
       })
@@ -2871,7 +3013,139 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [portfolioBannerRows]);
+  }, [marketHoursActive, portfolioBannerRows]);
+
+  useEffect(() => {
+    if (!authenticated || !marketHoursActive || !portfolioBannerSymbolKey) {
+      return undefined;
+    }
+
+    let socket;
+    let reconnectTimer;
+    let cancelled = false;
+
+    const connect = () => {
+      if (cancelled) {
+        return;
+      }
+
+      const wsBase = API_BASE
+        ? API_BASE.replace("http://", "ws://").replace("https://", "wss://")
+        : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+      socket = new WebSocket(`${wsBase}/api/live?mode=quotes&symbols=${encodeURIComponent(portfolioBannerSymbolKey)}`);
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type !== "quote" || !data.quote) {
+            return;
+          }
+
+          setPortfolioBannerQuotes((current) => mergeLiveQuoteIntoMap(current, data.quote));
+        } catch {
+          // Ignore malformed frames; the shared reconnect path will recover if needed.
+        }
+      };
+
+      socket.onclose = () => {
+        if (!cancelled) {
+          reconnectTimer = window.setTimeout(connect, Number(settings.reconnectSeconds) * 1000);
+        }
+      };
+
+      socket.onerror = () => {
+        if (!cancelled && socket?.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+      }
+      if (socket) {
+        socket.close();
+      }
+    };
+  }, [authenticated, marketHoursActive, portfolioBannerSymbolKey, settings.reconnectSeconds]);
+
+  const liveMarketStatus = useMemo(() => {
+    if (!authenticated) {
+      return {
+        className: "is-paused",
+        label: "Login Needed",
+        title: "Live market feed is unavailable until the broker session is authenticated.",
+      };
+    }
+
+    if (!marketHoursActive) {
+      return {
+        className: "is-paused",
+        label: "Market Paused",
+        title: `Auto live updates are paused outside the configured ${MARKET_TIME_ZONE_LABEL} live-data window (${marketWindowLabel} ${MARKET_TIME_ZONE_LABEL}). Last recorded LTP stays visible until the next session.`,
+      };
+    }
+
+    if (connectionStatus === "live") {
+      return {
+        className: "is-live",
+        label: "Live Market",
+        title: "Live market feed is connected and streaming.",
+      };
+    }
+
+    if (connectionStatus === "connecting") {
+      return {
+        className: "is-pending",
+        label: "Connecting...",
+        title: "Connecting to the live market feed.",
+      };
+    }
+
+    if (connectionStatus === "reconnecting") {
+      return {
+        className: "is-pending",
+        label: "Reconnecting...",
+        title: "Live market feed is reconnecting.",
+      };
+    }
+
+    return {
+      className: "is-paused",
+      label: "Feed Offline",
+      title: "Live market feed is not connected yet.",
+    };
+  }, [authenticated, connectionStatus, marketHoursActive, marketWindowLabel]);
+
+  const portfolioStreamStatusText = useMemo(() => {
+    if (!authenticated) {
+      return "Login to enable live websocket updates.";
+    }
+    if (!marketHoursActive) {
+      return `After-hours snapshot mode. Last recorded LTP stays visible until ${marketWindowLabel} ${MARKET_TIME_ZONE_LABEL}.`;
+    }
+    if (connectionStatus === "live") {
+      return "Streaming over websocket.";
+    }
+    if (connectionStatus === "connecting") {
+      return "Connecting to live websocket...";
+    }
+    if (connectionStatus === "reconnecting") {
+      return "Reconnecting to live websocket...";
+    }
+    return "Live websocket is offline; reconnect will resume automatically.";
+  }, [authenticated, connectionStatus, marketHoursActive, marketWindowLabel]);
+
+  const liveMarketButtonTitle = useMemo(() => {
+    const actionText = location.pathname === "/markets"
+      ? "Click to refresh current market quotes."
+      : "Click to open the Markets page and refresh current quotes.";
+    return `${liveMarketStatus.title} ${actionText}`;
+  }, [liveMarketStatus.title, location.pathname]);
 
   if (loading) {
     return (
@@ -2981,8 +3255,6 @@ export default function App() {
   };
   const pageTitle = PAGE_TITLES[location.pathname] || "Home Page";
   const showTopbarMarketStatus = true;
-  const hour = new Date().getHours();
-  const brokerStreamReady = authenticated && connectionStatus === "live" && Boolean(dashboard);
 
   const MAIN_NAV_ITEMS = [
     { to: "/dashboard", label: "Home", Icon: IcoDashboard },
@@ -2999,6 +3271,13 @@ export default function App() {
     { to: "/scanner",            label: "Command Deck", Icon: IcoCommand, end: true },
     { to: "/scanner/execution",  label: "Execution",    Icon: IcoTune },
   ];
+
+  function handleLiveMarketButtonClick() {
+    setLiveMarketRefreshToken((current) => current + 1);
+    if (location.pathname !== "/markets") {
+      navigate("/markets");
+    }
+  }
 
   return (
     <div className={`na-shell${sidebarExpanded ? "" : " sidebar-mini"}`}>
@@ -3069,11 +3348,12 @@ export default function App() {
             {showTopbarMarketStatus ? (
               <button
                 type="button"
-                className={`topbar-market-pill${brokerStreamReady ? " is-live" : ""}${location.pathname === "/markets" ? " is-active" : ""}`}
-                onClick={() => navigate("/markets")}
-                title="Open live market"
+                className={`topbar-market-pill ${liveMarketStatus.className}${location.pathname === "/markets" ? " is-active" : ""}`}
+                onClick={handleLiveMarketButtonClick}
+                title={liveMarketButtonTitle}
+                aria-label={liveMarketButtonTitle}
               >
-                Live Market
+                {liveMarketStatus.label}
               </button>
             ) : null}
             <div className="topbar-profile-shell" ref={profileMenuRef}>
@@ -3122,6 +3402,8 @@ export default function App() {
             element={(
               <>
                 <DashboardMarketWorkbench
+                  marketHoursActive={marketHoursActive}
+                  reconnectSeconds={settings.reconnectSeconds}
                   allStocksContent={(
                     <NseStocksTable
                       nseSymbols={nseSymbols}
@@ -3169,19 +3451,19 @@ export default function App() {
                     </div>
                   </div>
                   <div className="kpi-card">
-                    <div className={`kpi-icon ${Number(summary.total_pnl ?? 0) >= 0 ? "c-success" : "c-danger"}`}><IcoStrategy /></div>
+                    <div className={`kpi-icon ${portfolioBannerSummary.totalPnl >= 0 ? "c-success" : "c-danger"}`}><IcoStrategy /></div>
                     <div>
                       <div className="kpi-label">Total P&amp;L</div>
-                      <div className="kpi-value">{formatCurrency(summary.total_pnl ?? 0)}</div>
+                      <div className="kpi-value">{formatCurrency(portfolioBannerSummary.totalPnl)}</div>
                       <div className="kpi-sub">Live portfolio pulse</div>
                     </div>
                   </div>
                 </div>
 
                 {/* Charts */}
-                <SmartChartsBoard pnlSeries={pnlSeries} holdings={holdings} />
+                <SmartChartsBoard pnlSeries={pnlSeries} holdings={liveHoldingPortfolioRows} streamStatusText={portfolioStreamStatusText} />
 
-                <PortfolioTabbedSection holdings={holdings} positions={positions} trades={trades} />
+                <PortfolioTabbedSection holdingRows={liveHoldingPortfolioRows} positionRows={livePositionPortfolioRows} trades={trades} />
               </>
             )}
           />
@@ -3296,7 +3578,7 @@ export default function App() {
             )}
           />
 
-          <Route path="/markets" element={<MarketsPage defaultChartSymbol={settings.defaultChartSymbol} marketHoursActive={marketHoursActive} />} />
+          <Route path="/markets" element={<MarketsPage defaultChartSymbol={settings.defaultChartSymbol} marketHoursActive={marketHoursActive} refreshSignal={liveMarketRefreshToken} reconnectSeconds={settings.reconnectSeconds} />} />
           <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/scanner" element={<ScannerLayout />}>
             <Route index element={<ScannerCommandDeck />} />

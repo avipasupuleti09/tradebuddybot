@@ -6,6 +6,13 @@ import fyersPackage from 'fyers-api-v3';
 const { fyersModel } = fyersPackage;
 const require = createRequire(import.meta.url);
 const { axiosInstance } = require('fyers-api-v3/apiService/apiService.js');
+const FYERS_QUOTE_BATCH_SIZE = 10;
+const QUOTE_CACHE_TTL_MS = 1500;
+const QUOTE_REQUEST_GAP_MS = 250;
+const inflightQuoteRequests = new Map();
+const quoteResponseCache = new Map();
+let quoteRequestQueue = Promise.resolve();
+let lastQuoteRequestAt = 0;
 
 // FYERS SDK shares one keep-alive axios agent across requests, which can trip
 // TLS socket listener warnings under bursty dashboard refreshes. Use plain agents
@@ -23,6 +30,45 @@ function toUnixRange(dateValue, isEndOfDay = false) {
   return Math.floor(utcDate / 1000);
 }
 
+function normalizeQuoteSymbols(symbols) {
+  const items = Array.isArray(symbols)
+    ? symbols
+    : String(symbols || '').split(',');
+
+  return [...new Set(items.map((symbol) => String(symbol || '').trim()).filter(Boolean))];
+}
+
+function chunkItems(items, chunkSize) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += chunkSize) {
+    chunks.push(items.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function runQueuedQuoteRequest(task) {
+  const queuedTask = quoteRequestQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const waitMs = Math.max(0, QUOTE_REQUEST_GAP_MS - (Date.now() - lastQuoteRequestAt));
+      if (waitMs > 0) {
+        await wait(waitMs);
+      }
+      const result = await task();
+      lastQuoteRequestAt = Date.now();
+      return result;
+    });
+
+  quoteRequestQueue = queuedTask.catch(() => undefined);
+  return queuedTask;
+}
+
 export function createSessionClient({ clientId, redirectUri }) {
   const client = new fyersModel({ path: '', enableLogging: false });
   client.setAppId(clientId);
@@ -32,6 +78,7 @@ export function createSessionClient({ clientId, redirectUri }) {
 
 export class FyersApiService {
   constructor({ clientId, accessToken }) {
+    this.accessToken = accessToken;
     this.client = new fyersModel({ path: '', enableLogging: false });
     this.client.setAppId(clientId);
     this.client.setAccessToken(accessToken);
@@ -61,8 +108,53 @@ export class FyersApiService {
     return this.client.get_tradebook();
   }
 
-  quotes(symbols) {
-    return this.client.getQuotes(symbols);
+  async quotes(symbols) {
+    const normalizedSymbols = normalizeQuoteSymbols(symbols);
+    if (!normalizedSymbols.length) {
+      return { s: 'ok', code: 200, message: '', d: [] };
+    }
+
+    const requestKey = `${this.accessToken}:${normalizedSymbols.join(',')}`;
+    const cachedResponse = quoteResponseCache.get(requestKey);
+    if (cachedResponse && cachedResponse.expiresAt > Date.now()) {
+      return cachedResponse.payload;
+    }
+
+    if (inflightQuoteRequests.has(requestKey)) {
+      return inflightQuoteRequests.get(requestKey);
+    }
+
+    const requestPromise = (async () => {
+      const batches = chunkItems(normalizedSymbols, FYERS_QUOTE_BATCH_SIZE);
+      let mergedResponse = null;
+
+      for (const batch of batches) {
+        const response = await runQueuedQuoteRequest(() => this.client.getQuotes(batch));
+        if (!mergedResponse) {
+          mergedResponse = {
+            ...response,
+            d: [...(response?.d || [])],
+          };
+          continue;
+        }
+
+        mergedResponse.d.push(...(response?.d || []));
+      }
+
+      const payload = mergedResponse || { s: 'ok', code: 200, message: '', d: [] };
+      quoteResponseCache.set(requestKey, {
+        expiresAt: Date.now() + QUOTE_CACHE_TTL_MS,
+        payload,
+      });
+      return payload;
+    })();
+
+    inflightQuoteRequests.set(requestKey, requestPromise);
+    try {
+      return await requestPromise;
+    } finally {
+      inflightQuoteRequests.delete(requestKey);
+    }
   }
 
   getPriceAlert(payload) {

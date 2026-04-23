@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   API_BASE,
@@ -107,10 +107,12 @@ export default function AlertsPage() {
   const [quotesBySymbol, setQuotesBySymbol] = useState({});
   const [quoteFeed, setQuoteFeed] = useState([]);
   const [quoteStatus, setQuoteStatus] = useState("connecting");
+  const quoteFeedIdRef = useRef(0);
 
   const [selectedChannels, setSelectedChannels] = useState(DEFAULT_EVENT_CHANNELS);
   const [eventFeed, setEventFeed] = useState([]);
   const [eventStatus, setEventStatus] = useState("connecting");
+  const eventFeedIdRef = useRef(0);
 
   const streamSymbols = useMemo(() => normalizeSymbols(streamSymbolsInput), [streamSymbolsInput]);
   const streamSymbolKey = streamSymbols.join(",");
@@ -187,8 +189,9 @@ export default function AlertsPage() {
               ...payload.quote,
             },
           }));
+          quoteFeedIdRef.current += 1;
           setQuoteFeed((current) => pushLimited(current, {
-            id: `${symbol}-${Date.now()}`,
+            id: `${symbol}-${payload.quote.ts ?? payload.quote.timestamp ?? Date.now()}-${quoteFeedIdRef.current}`,
             symbol,
             receivedAt: new Date().toISOString(),
             quote: payload.quote,
@@ -265,8 +268,9 @@ export default function AlertsPage() {
             return;
           }
 
+          eventFeedIdRef.current += 1;
           setEventFeed((current) => pushLimited(current, {
-            id: `${payload.eventType}-${Date.now()}`,
+            id: `${payload.eventType || "general"}-${payload.timestamp ?? payload.payload?.timestamp ?? Date.now()}-${eventFeedIdRef.current}`,
             eventType: payload.eventType || "general",
             receivedAt: new Date().toISOString(),
             payload: payload.payload,

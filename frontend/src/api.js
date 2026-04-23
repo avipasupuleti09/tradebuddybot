@@ -1,6 +1,18 @@
 const API_BASE = import.meta.env.VITE_API_BASE || "";
+const QUOTE_RESPONSE_TTL_MS = 2000;
+const inflightQuoteRequests = new Map();
+const quoteResponseCache = new Map();
 
 export { API_BASE };
+
+function normalizeQuoteSymbols(symbols) {
+  return [...new Set(
+    (Array.isArray(symbols) ? symbols : [symbols])
+      .flatMap((value) => String(value || "").split(","))
+      .map((symbol) => symbol.trim())
+      .filter(Boolean),
+  )];
+}
 
 async function request(path, options = {}) {
   try {
@@ -162,8 +174,36 @@ export async function fetchDirectScreener(symbols, limit = 350) {
 
 // ── Quotes ─────────────────────────────────────────────────────────────────
 export async function fetchQuotes(symbols) {
-  const response = await request(`/api/quotes?symbols=${encodeURIComponent(symbols.join(","))}`);
-  return parse(response);
+  const normalizedSymbols = normalizeQuoteSymbols(symbols);
+  if (!normalizedSymbols.length) {
+    return { d: [] };
+  }
+
+  const requestKey = normalizedSymbols.join(",");
+  const cachedResponse = quoteResponseCache.get(requestKey);
+  if (cachedResponse && cachedResponse.expiresAt > Date.now()) {
+    return cachedResponse.payload;
+  }
+
+  if (inflightQuoteRequests.has(requestKey)) {
+    return inflightQuoteRequests.get(requestKey);
+  }
+
+  const requestPromise = request(`/api/quotes?symbols=${encodeURIComponent(requestKey)}`)
+    .then(parse)
+    .then((payload) => {
+      quoteResponseCache.set(requestKey, {
+        expiresAt: Date.now() + QUOTE_RESPONSE_TTL_MS,
+        payload,
+      });
+      return payload;
+    })
+    .finally(() => {
+      inflightQuoteRequests.delete(requestKey);
+    });
+
+  inflightQuoteRequests.set(requestKey, requestPromise);
+  return requestPromise;
 }
 
 // ── History for chart ──────────────────────────────────────────────────────

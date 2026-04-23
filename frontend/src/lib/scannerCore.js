@@ -1,1 +1,1 @@
-export * from '../../../shared/scanner-core/index.js'
+export * from '../../../backend/shared/scanner-core/index.js'

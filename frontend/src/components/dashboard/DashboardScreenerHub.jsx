@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { fetchAllNseSymbols, fetchDashboard, fetchDirectScreener, fetchWatchlistCatalog } from "../../api";
+import { API_BASE, fetchAllNseSymbols, fetchDashboard, fetchDirectScreener, fetchWatchlistCatalog } from "../../api";
 import { filterSymbolsByNseGroup, getNseGroupOption } from "../../nseGroups";
 import {
   buildDefaultDirectUniverseSymbols,
@@ -256,7 +256,7 @@ function isTransientFyersRateLimit(message) {
   return /request limit reached|retry after few mins|rate limit/i.test(String(message || ""));
 }
 
-export default function DashboardScreenerHub() {
+export default function DashboardScreenerHub({ marketHoursActive = false, reconnectSeconds = 3 }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -334,6 +334,11 @@ export default function DashboardScreenerHub() {
   );
   const activeScanUniverseKey = useMemo(() => activeScanSymbols.join("|"), [activeScanSymbols]);
   const defaultDirectUniverseKey = useMemo(() => defaultDirectUniverseSymbols.join("|"), [defaultDirectUniverseSymbols]);
+  const activeScreenerSymbols = useMemo(
+    () => normalizeUniverseSymbols(activeScanSymbols.length ? activeScanSymbols : defaultDirectUniverseSymbols),
+    [activeScanSymbols, defaultDirectUniverseSymbols],
+  );
+  const activeScreenerSymbolKey = useMemo(() => activeScreenerSymbols.join(","), [activeScreenerSymbols]);
   const brokerProfile = brokerDashboard?.profile?.data || {};
   const brokerFunds = brokerDashboard?.funds?.fund_limit?.[0] || {};
   const brokerHoldings = brokerDashboard?.holdings?.holdings || [];
@@ -420,6 +425,68 @@ export default function DashboardScreenerHub() {
 
     return () => window.clearInterval(intervalId);
   }, [activeShellTab, activeScanUniverseKey, defaultDirectUniverseKey]);
+
+  useEffect(() => {
+    if (activeShellTab !== "screeners" || !marketHoursActive || !activeScreenerSymbolKey) {
+      return undefined;
+    }
+
+    let socket;
+    let reconnectTimer;
+    let cancelled = false;
+
+    const connect = () => {
+      if (cancelled) {
+        return;
+      }
+
+      const wsBase = API_BASE
+        ? API_BASE.replace("http://", "ws://").replace("https://", "wss://")
+        : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+      socket = new WebSocket(`${wsBase}/api/live?mode=quotes&symbols=${encodeURIComponent(activeScreenerSymbolKey)}`);
+
+      socket.onmessage = (event) => {
+        if (cancelled) {
+          return;
+        }
+
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type !== "quote" || !payload.quote) {
+            return;
+          }
+
+          setDashboard((current) => mergeLiveQuoteIntoDashboard(current, payload.quote));
+        } catch {
+          // Ignore malformed frames; a reconnect or snapshot refresh will recover the feed.
+        }
+      };
+
+      socket.onerror = () => {
+        if (!cancelled && socket?.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+      };
+
+      socket.onclose = () => {
+        if (!cancelled) {
+          reconnectTimer = window.setTimeout(connect, Number(reconnectSeconds) * 1000);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+      }
+      if (socket) {
+        socket.close();
+      }
+    };
+  }, [activeShellTab, activeScreenerSymbolKey, marketHoursActive, reconnectSeconds]);
 
   const categories = useMemo(() => buildCategories(allRows, favoriteIds), [allRows, favoriteIds]);
   const activeCategory = useMemo(
@@ -740,7 +807,9 @@ export default function DashboardScreenerHub() {
             <div className="dashboard-screener-topline-actions">
               <span className="dashboard-screener-auto-copy">
                 {activeShellTab === "screeners"
-                  ? `Refreshes on tab entry and every 60 secs.${lastUpdated ? ` Last sync ${lastUpdated}` : ""}`
+                  ? marketHoursActive
+                    ? `Live quotes stream continuously; screener analytics re-sync every 60 secs.${lastUpdated ? ` Last full sync ${lastUpdated}` : ""}`
+                    : `Live quotes pause outside market hours.${lastUpdated ? ` Last full sync ${lastUpdated}` : ""}`
                   : `Refreshes on tab entry and every 60 secs.${brokerLastUpdated ? ` Last sync ${brokerLastUpdated}` : ""}`}
               </span>
               <button
@@ -1840,16 +1909,118 @@ function mergeLiveDataWithRows(rows, liveDataList) {
     if (!liveRow) {
       return row;
     }
+
+    const livePrice = firstNumber(
+      pickValue(liveRow, ["LTP", "ltp", "lp", "Price", "price"]),
+      row.LTP,
+      row.CurrentPrice,
+      row.DayClosePrice,
+      row.Close,
+    );
+    const liveOpen = firstNumber(
+      pickValue(liveRow, ["Open", "open", "o", "open_price"]),
+      row.Open,
+      row.DayOpen,
+    );
+    const liveHigh = firstNumber(
+      pickValue(liveRow, ["High", "high", "h", "high_price"]),
+      row.High,
+      row["52W_High"],
+    );
+    const liveLow = firstNumber(
+      pickValue(liveRow, ["Low", "low", "l", "low_price"]),
+      row.Low,
+      row["52W_Low"],
+    );
+    const prevClose = firstNumber(
+      pickValue(liveRow, ["Close", "close", "c", "prev_close", "prev_close_price"]),
+      row.Close,
+    );
+    const liveChangePct = firstNumber(
+      pickValue(liveRow, ["DayChange_%", "Change_%", "Chg%", "change_pct", "chp"]),
+      livePrice !== null && prevClose ? ((livePrice - prevClose) / prevClose) * 100 : null,
+      row["DayChange_%"],
+      row["Chg%"],
+      row["Change_%"],
+    );
+    const liveGapUpPct = firstNumber(
+      pickValue(liveRow, ["GapUp_%"]),
+      liveOpen !== null && prevClose ? ((liveOpen - prevClose) / prevClose) * 100 : null,
+      row["GapUp_%"],
+    );
+    const liveDayRetFromOpen = firstNumber(
+      pickValue(liveRow, ["DayRetFromOpen_%"]),
+      livePrice !== null && liveOpen ? ((livePrice - liveOpen) / liveOpen) * 100 : null,
+      row["DayRetFromOpen_%"],
+    );
+
     return {
       ...row,
-      LTP: pickValue(liveRow, ["LTP", "ltp", "lp", "Price", "price"]) ?? row.LTP,
-      Open: pickValue(liveRow, ["Open", "open", "o", "open_price"]) ?? row.Open,
-      High: pickValue(liveRow, ["High", "high", "h", "high_price"]) ?? row.High,
-      Low: pickValue(liveRow, ["Low", "low", "l", "low_price"]) ?? row.Low,
-      Close: pickValue(liveRow, ["Close", "close", "c", "prev_close", "prev_close_price"]) ?? row.Close,
-      Volume: pickValue(liveRow, ["Volume", "volume", "v"]) ?? row.Volume,
+      LTP: livePrice ?? row.LTP,
+      CurrentPrice: livePrice ?? row.CurrentPrice,
+      DayClosePrice: livePrice ?? row.DayClosePrice,
+      Open: liveOpen ?? row.Open,
+      DayOpen: liveOpen ?? row.DayOpen,
+      High: liveHigh ?? row.High,
+      Low: liveLow ?? row.Low,
+      Close: prevClose ?? row.Close,
+      Volume: pickValue(liveRow, ["Volume", "volume", "v", "vol_traded_today"]) ?? row.Volume,
+      "DayChange_%": liveChangePct ?? row["DayChange_%"],
+      "Chg%": liveChangePct ?? row["Chg%"],
+      "Change_%": liveChangePct ?? row["Change_%"],
+      "GapUp_%": liveGapUpPct ?? row["GapUp_%"],
+      "DayRetFromOpen_%": liveDayRetFromOpen ?? row["DayRetFromOpen_%"],
     };
   });
+}
+
+function mergeLiveQuoteIntoDashboard(currentDashboard, quote) {
+  if (!currentDashboard || !quote) {
+    return currentDashboard;
+  }
+
+  const quoteSymbol = quote.symbol || quote.n || quote.v?.symbol;
+  const symbolKey = normalizeTicker(quoteSymbol);
+  if (!symbolKey) {
+    return currentDashboard;
+  }
+
+  const currentDatasets = currentDashboard.datasets || {};
+  const currentLiveMarket = Array.isArray(currentDatasets.liveMarket) ? currentDatasets.liveMarket : [];
+  let foundMatch = false;
+
+  const nextLiveMarket = currentLiveMarket.map((item) => {
+    const itemKey = normalizeTicker(item.Ticker || item.Symbol || item.symbol);
+    if (itemKey !== symbolKey) {
+      return item;
+    }
+
+    foundMatch = true;
+    return {
+      ...item,
+      ...quote,
+      Ticker: item.Ticker || item.Symbol || item.symbol || quoteSymbol,
+      Symbol: item.Symbol || item.Ticker || item.symbol || quoteSymbol,
+      symbol: quoteSymbol,
+    };
+  });
+
+  if (!foundMatch) {
+    nextLiveMarket.push({
+      ...quote,
+      Ticker: quoteSymbol,
+      Symbol: quoteSymbol,
+      symbol: quoteSymbol,
+    });
+  }
+
+  return {
+    ...currentDashboard,
+    datasets: {
+      ...currentDatasets,
+      liveMarket: nextLiveMarket,
+    },
+  };
 }
 
 function pickValue(obj, keys) {

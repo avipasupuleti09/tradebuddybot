@@ -67,6 +67,7 @@ const DAILY_HISTORY_STALE_TTL_SECONDS = 3 * 24 * 60 * 60;
 const INTRADAY_HISTORY_STALE_TTL_SECONDS = 15 * 60;
 const HISTORY_ROWS_CACHE_PERSIST_DEBOUNCE_MS = 1500;
 const DASHBOARD_REQUEST_COOLDOWN_MS = 1500;
+const DASHBOARD_SECTION_TIMEOUT_MS = 15000;
 const ACCOUNT_PROFILE_FIELDS = ['firstName', 'lastName', 'email', 'phone', 'state', 'city', 'timezone'];
 const ACCOUNT_PROFILE_DIRNAME = 'profile';
 const ACCOUNT_PROFILE_FILENAME = 'account-profile.json';
@@ -332,7 +333,7 @@ function summarizeDashboard(holdings, positions, funds) {
   const positionRows = positions?.netPositions || [];
   const fundRows = funds?.fund_limit || [];
 
-  const holdingsPnl = holdingsRows.reduce((sum, item) => sum + (asNumber(item?.pnl) || 0), 0);
+  const holdingsPnl = holdingsRows.reduce((sum, item) => sum + (asNumber(item?.pl) || asNumber(item?.pnl) || 0), 0);
   const positionsPnl = positionRows.reduce((sum, item) => sum + (asNumber(item?.pl) || asNumber(item?.pnl) || 0), 0);
   const investedValue = holdingsRows.reduce((sum, item) => {
     return sum + ((asNumber(item?.costPrice) || 0) * (asNumber(item?.quantity) || 0));
@@ -348,16 +349,72 @@ function summarizeDashboard(holdings, positions, funds) {
   };
 }
 
+function withTimeout(operation, label, timeoutMs = DASHBOARD_SECTION_TIMEOUT_MS) {
+  let timer = null;
+
+  return Promise.race([
+    Promise.resolve().then(operation),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${label} request timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
+}
+
+function dashboardSectionError(label, fallback, error) {
+  return {
+    ...fallback,
+    s: 'error',
+    status: 'error',
+    message: error?.message || `Unable to load ${label}.`,
+  };
+}
+
+async function loadDashboardSection(label, operation, fallback) {
+  try {
+    return await withTimeout(operation, label);
+  } catch (error) {
+    return dashboardSectionError(label, fallback, error);
+  }
+}
+
 async function buildDashboardPayload(api) {
-  const profile = await api.profile();
-  const holdings = await api.holdings();
-  const positions = await api.positions();
-  const funds = await api.funds();
-  const orderbook = await api.orderbook();
-  const tradebook = await api.tradebook();
+  const [profile, holdings, positions, funds, orderbook, tradebook] = await Promise.all([
+    loadDashboardSection('profile', () => api.profile(), { data: {} }),
+    loadDashboardSection('holdings', () => api.holdings(), { holdings: [], overall: {} }),
+    loadDashboardSection('positions', () => api.positions(), { netPositions: [], overall: {} }),
+    loadDashboardSection('funds', () => api.funds(), { fund_limit: [] }),
+    loadDashboardSection('orderbook', () => api.orderbook(), { orderBook: [] }),
+    loadDashboardSection('tradebook', () => api.tradebook(), { tradeBook: [] }),
+  ]);
+
+  const errors = {};
+  for (const [label, payload] of [
+    ['profile', profile],
+    ['holdings', holdings],
+    ['positions', positions],
+    ['funds', funds],
+    ['orderbook', orderbook],
+    ['tradebook', tradebook],
+  ]) {
+    if (String(payload?.s || payload?.status || '').toLowerCase() === 'error') {
+      errors[label] = payload?.message || `Unable to load ${label}.`;
+    }
+  }
+
+  const warning = Object.keys(errors).length
+    ? 'Dashboard loaded with incomplete broker data. Check dashboard.errors for failed sections.'
+    : '';
 
   return {
-    status: 'ok',
+    status: warning ? 'partial' : 'ok',
+    warning,
+    errors,
     profile,
     holdings,
     positions,
@@ -680,13 +737,46 @@ export function createBackendService() {
   app.use(cors({ origin: true }));
   app.use(express.json({ limit: '1mb' }));
 
-  function resolveFrontendOrigin(req) {
-    if (frontendUrl) {
-      return frontendUrl;
-    }
+  function requestOrigin(req) {
     const forwardedProto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
     const forwardedHost = req.headers['x-forwarded-host'] || req.headers.host;
     return `${forwardedProto}://${forwardedHost}`.replace(/\/$/, '');
+  }
+
+  function isLoopbackOrigin(origin) {
+    try {
+      const { hostname } = new URL(origin);
+      return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+    } catch {
+      return false;
+    }
+  }
+
+  async function resolveFrontendOrigin(req) {
+    const fallbackOrigin = requestOrigin(req);
+    if (!frontendUrl) {
+      return fallbackOrigin;
+    }
+
+    if (!isLoopbackOrigin(frontendUrl) || frontendUrl === fallbackOrigin) {
+      return frontendUrl;
+    }
+
+    try {
+      const probeUrl = new URL('/', `${frontendUrl}/`).toString();
+      const response = await fetch(probeUrl, {
+        method: 'HEAD',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(800),
+      });
+      if (response.ok || (response.status >= 300 && response.status < 400)) {
+        return frontendUrl;
+      }
+    } catch {
+      // Fall back to the backend-served origin when the local frontend dev server is unavailable.
+    }
+
+    return fallbackOrigin;
   }
 
   async function loadStoredAccountProfileRecord() {
@@ -1630,7 +1720,7 @@ export function createBackendService() {
     }
 
     const authService = new FyersAuthService(settings);
-    const target = resolveFrontendOrigin(req);
+    const target = await resolveFrontendOrigin(req);
     try {
       const result = await authService.exchangeAuthCode(authCode);
       await tokenStore.save(result);
