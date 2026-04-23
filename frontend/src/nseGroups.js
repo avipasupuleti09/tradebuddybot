@@ -42,6 +42,21 @@ function includesAny(text, tokens = []) {
   return tokens.some((token) => text.includes(token));
 }
 
+function matchesExplicitGroupMember(item, rule) {
+  const short = String(item?.short || "").toUpperCase();
+  if (rule.symbols?.has(item?.symbol)) {
+    return true;
+  }
+  if (rule.shorts?.has(short)) {
+    return true;
+  }
+  return false;
+}
+
+function isIndexInstrument(symbol) {
+  return String(symbol || "").toUpperCase().endsWith("-INDEX");
+}
+
 const GROUP_RULES = {
   "gold-silver": {
     symbols: exact([
@@ -594,6 +609,44 @@ export function getNseGroupOption(groupId) {
   return NSE_STOCK_GROUP_OPTIONS.find((item) => item.id === groupId) || NSE_STOCK_GROUP_OPTIONS[0];
 }
 
+export function filterTableSymbolsByNseGroup(symbols, groupId) {
+  const source = Array.isArray(symbols) ? symbols : [];
+
+  if (!groupId || groupId === "all") {
+    return source.filter((item) => !isIndexInstrument(item?.symbol));
+  }
+
+  const rule = GROUP_RULES[groupId];
+  if (!rule) {
+    return source.filter((item) => !isIndexInstrument(item?.symbol));
+  }
+
+  const hasExplicitMembers = Boolean(rule.symbols?.size || rule.shorts?.size);
+
+  return source.filter((item) => {
+    if (isIndexInstrument(item?.symbol)) {
+      return false;
+    }
+
+    if (matchesExplicitGroupMember(item, rule)) {
+      return true;
+    }
+
+    if (hasExplicitMembers) {
+      return false;
+    }
+
+    const text = buildText(item);
+    if (rule.tokens && includesAny(text, rule.tokens)) {
+      return true;
+    }
+    if (rule.custom && rule.custom(item, text)) {
+      return true;
+    }
+    return false;
+  });
+}
+
 export function filterSymbolsByNseGroup(symbols, groupId) {
   if (!groupId || groupId === "all") {
     return symbols;
@@ -605,14 +658,11 @@ export function filterSymbolsByNseGroup(symbols, groupId) {
   }
 
   return symbols.filter((item) => {
+    if (matchesExplicitGroupMember(item, rule)) {
+      return true;
+    }
+
     const text = buildText(item);
-    const short = String(item?.short || "").toUpperCase();
-    if (rule.symbols?.has(item?.symbol)) {
-      return true;
-    }
-    if (rule.shorts?.has(short)) {
-      return true;
-    }
     if (rule.tokens && includesAny(text, rule.tokens)) {
       return true;
     }

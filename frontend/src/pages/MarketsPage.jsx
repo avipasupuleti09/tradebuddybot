@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createChart, createSeriesMarkers, ColorType, CrosshairMode, CandlestickSeries, LineSeries, LineStyle } from "lightweight-charts";
 import {
+  API_BASE,
   searchSymbols,
   fetchQuotes,
   fetchHistory,
@@ -53,6 +54,8 @@ function SortableTableHeader({ label, sortKey, sortState, onSort, className = ""
 const MFI_SIGNAL_LENGTH = 10;
 const MFI_OVERBOUGHT_LEVEL = 80;
 const MFI_OVERSOLD_LEVEL = 20;
+const MARKET_TIME_ZONE = "Asia/Kolkata";
+const MARKET_TIME_ZONE_LABEL = "IST";
 const IST_OFFSET_SECONDS = ((5 * 60) + 30) * 60;
 const EMPTY_CHART_REFERENCE_LEVELS = {
   prevClose: null,
@@ -113,6 +116,40 @@ function buildChartReferenceItems(levels, colors) {
 function toFiniteNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function formatMarketClock(value) {
+  if (!value) {
+    return "--:--:--";
+  }
+  return value.toLocaleTimeString("en-IN", {
+    hour12: false,
+    timeZone: MARKET_TIME_ZONE,
+  });
+}
+
+function mergeQuoteIntoMap(currentQuotes, quote) {
+  const symbol = quote?.symbol || quote?.n || quote?.v?.symbol;
+  if (!symbol) {
+    return currentQuotes;
+  }
+
+  const normalizedQuote = {
+    ...quote,
+    symbol,
+    lp: quote?.lp ?? quote?.ltp,
+    ltp: quote?.ltp ?? quote?.lp,
+    volume: quote?.volume ?? quote?.vol_traded_today,
+  };
+
+  return {
+    ...currentQuotes,
+    [symbol]: {
+      ...(currentQuotes[symbol] || {}),
+      ...normalizedQuote,
+      symbol,
+    },
+  };
 }
 
 function buildChartReferenceLevels(quote = {}) {
@@ -403,7 +440,7 @@ const FALLBACK_SMART_WATCHLISTS = [
 ];
 
 /* ─── Main component ──────────────────────────────────────────────────────── */
-export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
+export default function MarketsPage({ defaultChartSymbol, marketHoursActive, refreshSignal, reconnectSeconds = 3 }) {
   const WATCH_TABS = {
     MY: "my",
     PREDEFINED: "predefined",
@@ -443,7 +480,6 @@ export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
   // Quotes for active watchlist
   const [quotes, setQuotes] = useState({});
   const [quotesUpdatedAt, setQuotesUpdatedAt] = useState(null);
-  const quotesTimer = useRef(null);
   const [watchlistSortState, setWatchlistSortState] = useState({ key: "symbol", direction: "asc" });
 
   // selected row for chart
@@ -515,6 +551,11 @@ export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
     }
     return sorted;
   })();
+      const streamSymbols = useMemo(
+        () => [...new Set([...activeSymbols, chartSymbol].filter(Boolean))],
+        [activeSymbols, chartSymbol],
+      );
+      const streamSymbolsKey = useMemo(() => streamSymbols.join(","), [streamSymbols]);
 
   const activeCollectionName =
     watchTab === WATCH_TABS.MY
@@ -633,18 +674,24 @@ export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
     }
   }
 
-  /* ── Live quotes polling for active watchlist ── */
+  /* ── Live quotes streaming for active watchlist + chart symbol ── */
   useEffect(() => {
-    if (quotesTimer.current) clearInterval(quotesTimer.current);
-    if (!activeSymbols.length) {
+    if (!streamSymbols.length) {
       setQuotes({});
-      return;
+      return undefined;
     }
 
-    const symbols = activeSymbols;
-    const poll = async () => {
+    let cancelled = false;
+    let socket;
+    let reconnectTimer;
+
+    const hydrateQuotes = async () => {
       try {
-        const data = await fetchQuotes(symbols);
+        const data = await fetchQuotes(streamSymbols);
+        if (cancelled) {
+          return;
+        }
+
         const map = {};
         (data.d || []).forEach((item) => {
           const sym = item.n || item.v?.symbol;
@@ -653,18 +700,68 @@ export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
         setQuotes(map);
         setQuotesUpdatedAt(new Date());
       } catch {
-        /* silently retry */
+        // Keep the current snapshot visible if hydration fails.
       }
     };
 
-    poll();
+    const connect = () => {
+      if (cancelled) {
+        return;
+      }
+
+      const wsBase = API_BASE
+        ? API_BASE.replace("http://", "ws://").replace("https://", "wss://")
+        : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+      socket = new WebSocket(`${wsBase}/api/live?mode=quotes&symbols=${encodeURIComponent(streamSymbolsKey)}`);
+
+      socket.onmessage = (event) => {
+        if (cancelled) {
+          return;
+        }
+
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type !== "quote" || !payload.quote) {
+            return;
+          }
+
+          setQuotes((current) => mergeQuoteIntoMap(current, payload.quote));
+          setQuotesUpdatedAt(new Date());
+        } catch {
+          // Ignore malformed frames; reconnect or manual refresh will recover the view.
+        }
+      };
+
+      socket.onerror = () => {
+        if (!cancelled && socket?.readyState === WebSocket.OPEN) {
+          socket.close();
+        }
+      };
+
+      socket.onclose = () => {
+        if (!cancelled) {
+          reconnectTimer = window.setTimeout(connect, Number(reconnectSeconds) * 1000);
+        }
+      };
+    };
+
+    void hydrateQuotes();
     if (!marketHoursActive) {
       return undefined;
     }
 
-    quotesTimer.current = setInterval(poll, 5000);
-    return () => clearInterval(quotesTimer.current);
-  }, [activeSymbols, marketHoursActive]);
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) {
+        window.clearTimeout(reconnectTimer);
+      }
+      if (socket) {
+        socket.close();
+      }
+    };
+  }, [marketHoursActive, reconnectSeconds, streamSymbols, streamSymbolsKey]);
 
   /* ── Debounced symbol search ── */
   const doSearch = useCallback(
@@ -712,7 +809,6 @@ export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
   const chartReferenceLinesRef = useRef([]);
   const markerSeriesRef = useRef(null);
   const mfiLineSeriesRef = useRef(null);
-  const tickTimerRef = useRef(null);
   const chartDataRef = useRef([]);
   const syncingLogicalRangeRef = useRef(false);
   const defaultChartSeedRef = useRef("");
@@ -1169,67 +1265,49 @@ export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
     };
   }, [chartData, chartSymbol, isDarkTheme]);
 
-  /* ── Live tick-by-tick updates (poll every 1s) ── */
+  const liveChartQuote = chartSymbol ? (quotes[chartSymbol] || null) : null;
+
+  /* ── Live chart updates during the active market session ── */
   useEffect(() => {
-    if (tickTimerRef.current) clearInterval(tickTimerRef.current);
-    if (!chartSymbol || !candleSeriesRef.current || !marketHoursActive) return;
+    if (!chartSymbol || !candleSeriesRef.current || !marketHoursActive || !liveChartQuote) return;
 
     const resSeconds = resolution === "D" ? 86400
       : resolution.startsWith("S") ? parseInt(resolution.slice(1), 10)
       : parseInt(resolution, 10) * 60;
+    const ltp = liveChartQuote.lp;
+    if (ltp == null) return;
 
-    const pollTick = async () => {
-      try {
-        const data = await fetchQuotes([chartSymbol]);
-        const items = data.d || [];
-        if (!items.length) return;
-        const q = items[0].v || {};
-        const ltp = q.lp;
-        if (ltp == null) return;
-
-        // Compute the candle time bucket for the current tick
-        const nowSec = Math.floor(Date.now() / 1000) + IST_OFFSET_SECONDS;
-        const candleTime = Math.floor(nowSec / resSeconds) * resSeconds;
-
-        // Update candlestick: .update() will either update current bar or add new one
-        const tickCandle = {
-          time: candleTime,
-          open: q.open_price || ltp,
-          high: q.high_price || ltp,
-          low: q.low_price || ltp,
-          close: ltp,
-        };
-        const lastCandleTime = chartDataRef.current[chartDataRef.current.length - 1]?.time;
-        if (Number.isFinite(lastCandleTime) && tickCandle.time < lastCandleTime) {
-          return;
-        }
-        candleSeriesRef.current.update(tickCandle);
-
-        chartDataRef.current = mergeTickIntoCandles(chartDataRef.current, tickCandle, q.volume || 0);
-        const mfiArtifacts = buildMfiArtifacts(chartDataRef.current);
-        markerSeriesRef.current?.setMarkers(mfiArtifacts.markers);
-        mfiLineSeriesRef.current?.setData(mfiArtifacts.series);
-        setMfiInfo(mfiArtifacts.lastValue);
-        const nextLevels = buildChartReferenceLevels(q);
-        setChartReferenceLevels((current) => (hasSameChartReferenceLevels(current, nextLevels) ? current : nextLevels));
-
-        // Update OHLC header with live values
-        setOhlcInfo((prev) => ({
-          ...prev,
-          open: q.open_price || prev?.open,
-          high: q.high_price || prev?.high,
-          low: q.low_price || prev?.low,
-          close: ltp,
-        }));
-      } catch {
-        /* silently skip tick errors */
-      }
+    const nowSec = Math.floor(Date.now() / 1000) + IST_OFFSET_SECONDS;
+    const candleTime = Math.floor(nowSec / resSeconds) * resSeconds;
+    const tickCandle = {
+      time: candleTime,
+      open: liveChartQuote.open_price || ltp,
+      high: liveChartQuote.high_price || ltp,
+      low: liveChartQuote.low_price || ltp,
+      close: ltp,
     };
+    const lastCandleTime = chartDataRef.current[chartDataRef.current.length - 1]?.time;
+    if (Number.isFinite(lastCandleTime) && tickCandle.time < lastCandleTime) {
+      return;
+    }
+    candleSeriesRef.current.update(tickCandle);
 
-    pollTick();
-    tickTimerRef.current = setInterval(pollTick, CHART_TICK_POLL_MS);
-    return () => clearInterval(tickTimerRef.current);
-  }, [chartSymbol, resolution, chartData.length, marketHoursActive]);
+    chartDataRef.current = mergeTickIntoCandles(chartDataRef.current, tickCandle, liveChartQuote.volume || 0);
+    const mfiArtifacts = buildMfiArtifacts(chartDataRef.current);
+    markerSeriesRef.current?.setMarkers(mfiArtifacts.markers);
+    mfiLineSeriesRef.current?.setData(mfiArtifacts.series);
+    setMfiInfo(mfiArtifacts.lastValue);
+    const nextLevels = buildChartReferenceLevels(liveChartQuote);
+    setChartReferenceLevels((current) => (hasSameChartReferenceLevels(current, nextLevels) ? current : nextLevels));
+
+    setOhlcInfo((prev) => ({
+      ...prev,
+      open: liveChartQuote.open_price || prev?.open,
+      high: liveChartQuote.high_price || prev?.high,
+      low: liveChartQuote.low_price || prev?.low,
+      close: ltp,
+    }));
+  }, [chartSymbol, resolution, marketHoursActive, liveChartQuote]);
 
   /* ── Handlers ── */
   async function handleCreateList() {
@@ -1315,7 +1393,7 @@ export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
 
   async function refreshCurrentQuotes() {
     try {
-      const symbols = watchTab === WATCH_TABS.SMART ? smartDisplaySymbols : activeSymbols;
+      const symbols = streamSymbols.length ? streamSymbols : (watchTab === WATCH_TABS.SMART ? smartDisplaySymbols : activeSymbols);
       if (!symbols.length) return;
       const data = await fetchQuotes(symbols);
       const map = {};
@@ -1330,6 +1408,13 @@ export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
     }
   }
 
+  useEffect(() => {
+    if (!refreshSignal) {
+      return;
+    }
+    void refreshCurrentQuotes()
+  }, [refreshSignal])
+
   function handleRowClick(symbol) {
     setError("");
     setNotice("");
@@ -1338,6 +1423,12 @@ export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
   }
 
   const chartSymbolParts = useMemo(() => splitMarketSymbol(chartSymbol), [chartSymbol]);
+  const quoteSnapshotText = useMemo(() => {
+    if (marketHoursActive) {
+      return `Last updated ${formatMarketClock(quotesUpdatedAt)} ${MARKET_TIME_ZONE_LABEL}`;
+    }
+    return `Showing last recorded LTP ${formatMarketClock(quotesUpdatedAt)} ${MARKET_TIME_ZONE_LABEL}`;
+  }, [marketHoursActive, quotesUpdatedAt]);
 
   return (
     <div className="markets-page">
@@ -1564,9 +1655,7 @@ export default function MarketsPage({ defaultChartSymbol, marketHoursActive }) {
           ) : (
             <div className="fwl-search fwl-search-top fwl-smart-search-row">
               <div className="fwl-smart-meta-row">
-                <span className="fwl-hint">
-                  Last updated {quotesUpdatedAt ? quotesUpdatedAt.toLocaleTimeString("en-IN") : "--:--:--"}
-                </span>
+                <span className="fwl-hint">{quoteSnapshotText}</span>
                 <button className="fwl-smart-refresh" onClick={refreshCurrentQuotes} title="Refresh">↻</button>
               </div>
               <input

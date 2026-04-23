@@ -5,7 +5,7 @@ TradeBuddy now runs as a Node.js stack end to end:
 - Express backend for FYERS auth, quotes, history, orders, watchlists, analytics, and live websocket streaming
 - React + Vite frontend on `http://localhost:5100`
 - Node-based scanner service on `http://localhost:8001`
-- Main Node server that can also run in hosted mode to serve `frontend/dist` and mount both `/api` and `/scanner-api`
+- Main Node backend server on `http://localhost:5000`
 
 ## Prerequisites
 
@@ -72,7 +72,6 @@ npm run dev:frontend
 - Frontend: `http://localhost:5100`
 - Backend health: `http://localhost:5000/api/health`
 - Scanner health: `http://localhost:8001/api/health`
-- Hosted health: `http://localhost:3000/health`
 
 The Vite frontend proxies:
 
@@ -88,76 +87,71 @@ The Vite frontend proxies:
 5. If FYERS requires browser auth, the app redirects to the FYERS login page.
 6. After callback, the backend stores the token and returns to the UI.
 
-## Production / Hosted Mode
+## Frontend Build
 
-Build and start the single hosted Node server:
+Build the frontend bundle when you need a production UI artifact:
 
 ```powershell
 npm run build
-npm start
 ```
 
-Recommended hosted settings:
+For production hosting, the built frontend is served by the same Node.js process as the backend API. When `frontend/dist` exists, [backend/server.js](backend/server.js) serves the React bundle and routes all non-API paths back to `index.html`.
 
-```text
-Root directory: /
-Install command: npm install
-Build command: npm run build
-Start command: npm start
-Node version: 22.x
+Backend source layout is now consolidated under [backend](backend):
+
+- [backend/server.js](backend/server.js) is the Node entrypoint
+- [backend/scanner](backend/scanner) contains the scanner service
+- [backend/shared/scanner-core](backend/shared/scanner-core) contains shared scanner-core logic used by both backend and frontend
+
+## Azure App Service
+
+The repo now includes App Service deployment artifacts:
+
+- [azure.yaml](azure.yaml) for `azd`
+- [infra/main.bicep](infra/main.bicep) for the Linux App Service plan and web app
+
+Production shape on Azure:
+
+- one Linux App Service web app
+- Express backend on the platform `PORT`
+- scanner mounted in-process at `/scanner-api`
+- built React frontend served by the same Node.js process
+
+### App settings to provide
+
+The Azure Bicep template expects these values:
+
+- `FYERS_CLIENT_ID`
+- `FYERS_SECRET_KEY`
+- `FYERS_USER_ID`
+- `FYERS_TOTP_KEY`
+- optional `FYERS_PIN`
+- optional `FYERS_ORDER_STATIC_IP`
+- optional `FRONTEND_URL`
+- optional `FYERS_REDIRECT_URI`
+
+### Static IP caveat
+
+FYERS live-order protection currently supports a static outbound IP check. A standard App Service deployment does not give you one guaranteed fixed outbound IP for broker whitelisting across all scenarios. For an initial Azure rollout, keep `FYERS_PAPER_TRADE_MODE=true` and usually set `FYERS_ENFORCE_STATIC_IP_CHECK=false` unless you have a fixed outbound networking design in place.
+
+### azd workflow
+
+Example setup:
+
+```powershell
+azd auth login
+azd env new <environment-name>
+azd env set FYERS_CLIENT_ID <value>
+azd env set FYERS_SECRET_KEY <value>
+azd env set FYERS_USER_ID <value>
+azd env set FYERS_TOTP_KEY <value>
+azd env set FYERS_PAPER_TRADE_MODE true
+azd env set FYERS_ENFORCE_STATIC_IP_CHECK false
+azd provision --preview
+azd up
 ```
 
-## Hostinger Checklist
-
-Use these settings on Hostinger's Node.js plan:
-
-```text
-Application root: /
-Install command: npm install
-Build command: npm run build
-Start command: npm start
-Node version: 22.x
-```
-
-Required production environment values:
-
-```text
-FRONTEND_URL=https://your-domain.example
-FYERS_REDIRECT_URI=https://your-domain.example/api/auth/callback
-FYERS_PAPER_TRADE_MODE=true
-HOSTED_MODE=true
-```
-
-`HOSTED_MODE=true` is the safest explicit setting for managed hosts. The server will also auto-enable hosted mode when the platform injects `PORT` and `frontend/dist/index.html` exists.
-
-Important runtime notes:
-
-- Do not set `BACKEND_API_BASE` in hosted mode unless you intentionally want the scanner to call a different backend host. Leaving it unset lets `/scanner-api` reuse the same hosted Node process.
-- If Hostinger logs mention removed legacy bootstrap files, the platform is deploying an old snapshot or wrong root rather than the current Node-only app.
-- Clear Hostinger build cache or remove the old deployed app files before redeploying if stale logs persist.
-- Confirm the deployed root contains the current `package.json` where `build` runs the root Vite build and `start` is `node server.js --hosted`.
-
-Hosted runtime behavior:
-
-- serves `frontend/dist`
-- exposes backend routes under `/api/*`
-- exposes scanner routes under `/scanner-api/*`
-- exposes health on `/health`
-
-Implementation note:
-
-- `npm start` now runs `node server.js --hosted`; the separate `hosting` folder is no longer used.
-- The root package no longer relies on npm workspaces; `npm run build` now uses a root `vite.config.js` that targets the nested `frontend/` app while keeping the Node server as the runtime entrypoint.
-- On managed Node hosts, the server also auto-switches into hosted mode when `PORT` is assigned and the built frontend is present, which avoids `Cannot GET /` if CLI flags are dropped by the platform.
-
-Required environment overrides for a deployed domain:
-
-```text
-FRONTEND_URL=https://your-domain.example
-FYERS_REDIRECT_URI=https://your-domain.example/api/auth/callback
-FYERS_PAPER_TRADE_MODE=true
-HOSTED_MODE=true
-```
+The `azd` packaging step runs `npm install` and `npm run build`. The root `prebuild` script installs the frontend dependencies before Vite builds the production bundle.
 
 ## Features
 

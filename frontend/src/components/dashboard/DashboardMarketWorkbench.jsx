@@ -6,7 +6,7 @@ const DASHBOARD_TABS = [
   { id: "screeners", label: "Screeners" },
 ];
 
-export default function DashboardMarketWorkbench({ allStocksContent }) {
+export default function DashboardMarketWorkbench({ allStocksContent, marketHoursActive, reconnectSeconds }) {
   const [activeTab, setActiveTab] = useState("all-stocks");
 
   return (
@@ -27,7 +27,9 @@ export default function DashboardMarketWorkbench({ allStocksContent }) {
       </div>
 
       <div className="dashboard-market-tab-panel">
-        {activeTab === "all-stocks" ? allStocksContent : <DashboardScreenerHub />}
+        {activeTab === "all-stocks"
+          ? allStocksContent
+          : <DashboardScreenerHub marketHoursActive={marketHoursActive} reconnectSeconds={reconnectSeconds} />}
       </div>
     </section>
   );

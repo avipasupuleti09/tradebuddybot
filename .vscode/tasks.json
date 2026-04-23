@@ -5,7 +5,7 @@
       "label": "Run Backend",
       "type": "shell",
       "command": "node",
-      "args": ["${workspaceFolder}\\server.js"],
+      "args": ["${workspaceFolder}\\backend\\server.js"],
       "isBackground": true,
       "options": {
         "cwd": "${workspaceFolder}",
@@ -54,7 +54,7 @@
       "label": "Run Scanner",
       "type": "shell",
       "command": "node",
-      "args": ["--env-file=.env", "${workspaceFolder}\\scanner\\index.js"],
+      "args": ["--env-file=.env", "${workspaceFolder}\\backend\\scanner\\index.js"],
       "isBackground": true,
       "options": {
         "cwd": "${workspaceFolder}"

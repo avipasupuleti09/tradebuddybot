@@ -3,8 +3,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchAccountProfile, saveAccountProfile } from "../api";
 import { MARKET_INDEX_OPTIONS } from "../lib/marketIndexes";
 
-const DEFAULT_MARKET_START_TIME = "09:15";
-const DEFAULT_MARKET_END_TIME = "15:30";
+const MARKET_TIME_ZONE_LABEL = "IST";
+const DEFAULT_MARKET_START_TIME = "09:00";
+const DEFAULT_MARKET_END_TIME = "15:45";
 const TIME_VALUE_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
 const SETTINGS_TABS = [
@@ -236,7 +237,7 @@ export default function SettingsPage({
     return MARKET_INDEX_OPTIONS.find((option) => option.value === settings.defaultChartSymbol)?.label || settings.defaultChartSymbol;
   }, [settings.defaultChartSymbol]);
   const marketWindowLabel = useMemo(() => {
-    return `${formatTimeValue(settings.marketStartTime, DEFAULT_MARKET_START_TIME)} - ${formatTimeValue(settings.marketEndTime, DEFAULT_MARKET_END_TIME)}`;
+    return `${formatTimeValue(settings.marketStartTime, DEFAULT_MARKET_START_TIME)} - ${formatTimeValue(settings.marketEndTime, DEFAULT_MARKET_END_TIME)} ${MARKET_TIME_ZONE_LABEL}`;
   }, [settings.marketEndTime, settings.marketStartTime]);
 
   return (
@@ -408,18 +409,18 @@ export default function SettingsPage({
           <div className="panel-head">
             <div>
               <h3>Configuration</h3>
-              <p>These preferences persist in your browser and control when live market data should stream automatically.</p>
+              <p>These preferences persist in your browser and control when live market data should stream automatically in the {MARKET_TIME_ZONE_LABEL} session.</p>
             </div>
           </div>
 
           <div className="settings-tab-panel-body form-grid">
             <div className="form-row-2">
               <label>
-                Market Start Time
+                Market Start Time ({MARKET_TIME_ZONE_LABEL})
                 <input name="marketStartTime" type="time" step="60" value={normalizeTimeValue(settings.marketStartTime, DEFAULT_MARKET_START_TIME)} onChange={onSettingsChange} />
               </label>
               <label>
-                Market End Time
+                Market End Time ({MARKET_TIME_ZONE_LABEL})
                 <input name="marketEndTime" type="time" step="60" value={normalizeTimeValue(settings.marketEndTime, DEFAULT_MARKET_END_TIME)} onChange={onSettingsChange} />
               </label>
             </div>
@@ -428,7 +429,7 @@ export default function SettingsPage({
               <div className="settings-config-card">
                 <strong>Live data window</strong>
                 <span>{marketWindowLabel}</span>
-                <small>Automatic live quotes, reconnect attempts, and market polling only run inside this browser-time session.</small>
+                <small>Automatic live quotes, reconnect attempts, and market polling only run inside this {MARKET_TIME_ZONE_LABEL} session.</small>
               </div>
               <div className="settings-config-card">
                 <strong>Save behavior</strong>
@@ -437,7 +438,7 @@ export default function SettingsPage({
               </div>
             </div>
 
-            <p className="settings-tab-hint">Workspace configuration saves automatically in this browser. Outside the configured market window, automatic live streams stay paused.</p>
+            <p className="settings-tab-hint">Workspace configuration saves automatically in this browser. Outside the configured market window, automatic live streams stay paused and the latest recorded LTP snapshot remains visible.</p>
           </div>
         </div>
       ) : null}

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
-const rootDir = path.resolve(__dirname, '..', '..')
+const rootDir = path.resolve(__dirname, '..', '..', '..')
 const preferredDataDir = path.join(rootDir, 'data')
 const legacyDataDir = path.join(rootDir, 'data')
 const cacheDir = path.join(rootDir, '.cache')
@@ -56,10 +56,7 @@ function defaultBackendApiBase() {
     return process.env.BACKEND_API_BASE
   }
 
-  const hostedMode = process.argv.includes('--hosted')
-  const port = hostedMode
-    ? Number(process.env.PORT || 3000)
-    : Number(process.env.BACKEND_PORT || 5000)
+  const port = Number(process.env.BACKEND_PORT || process.env.PORT || 5000)
 
   return `http://127.0.0.1:${port}`
 }

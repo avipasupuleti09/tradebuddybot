@@ -1,0 +1,23 @@
+name: tradebuddybot
+metadata:
+  template: tradebuddybot-appservice@0.0.1-beta
+infra:
+  provider: bicep
+  path: infra
+  module: main
+services:
+  web:
+    project: .
+    language: js
+    host: appservice
+    module: main
+    config:
+      packageManager: npm
+    hooks:
+      prepackage:
+        windows:
+          shell: pwsh
+          run: npm install; npm run build
+        posix:
+          shell: sh
+          run: npm install && npm run build
