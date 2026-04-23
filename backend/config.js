@@ -8,7 +8,7 @@ const __dirname = path.dirname(__filename);
 export const projectRoot = path.resolve(__dirname, '..');
 export const projectEnvFile = path.join(projectRoot, '.env');
 
-dotenv.config({ path: projectEnvFile, override: true });
+dotenv.config({ path: projectEnvFile });
 
 function required(name) {
   const value = String(process.env[name] || '').trim();

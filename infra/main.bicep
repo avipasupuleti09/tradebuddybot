@@ -61,14 +61,23 @@ param FYERS_TOKEN_FILE string = '.tokens/fyers_token.json'
 @description('Optional outbound static IP that FYERS should trust for live orders.')
 param FYERS_ORDER_STATIC_IP string = ''
 
+@description('Whether to provision managed outbound egress for the App Service by using regional VNet integration and a NAT Gateway.')
+param ENABLE_MANAGED_OUTBOUND_EGRESS string = 'false'
+
+@description('Address space for the optional virtual network used by App Service outbound integration.')
+param OUTBOUND_VNET_ADDRESS_PREFIX string = '10.240.0.0/24'
+
+@description('Subnet prefix for the App Service outbound integration subnet. Use at least /27 for headroom and /26 if you expect higher scale.')
+param OUTBOUND_INTEGRATION_SUBNET_PREFIX string = '10.240.0.0/26'
+
 @description('Whether the backend should enforce the FYERS outbound static IP check. App Service users normally start with false unless they have fixed outbound networking in place.')
-param FYERS_ENFORCE_STATIC_IP_CHECK bool = false
+param FYERS_ENFORCE_STATIC_IP_CHECK string = 'false'
 
 @description('Public IP discovery endpoint used by the backend static IP check.')
 param PUBLIC_IP_CHECK_URL string = 'https://api.ipify.org'
 
 @description('Paper-trading mode flag for order placement.')
-param FYERS_PAPER_TRADE_MODE bool = true
+param FYERS_PAPER_TRADE_MODE string = 'true'
 
 @description('Optional public frontend URL override. Leave empty to use the default azurewebsites.net hostname.')
 param FRONTEND_URL string = ''
@@ -82,8 +91,31 @@ param TAGS object = {}
 var generatedWebAppName = toLower(take('tradebuddy-${environmentName}-${uniqueString(subscription().subscriptionId, resourceGroup().id, environmentName)}', 60))
 var webAppName = empty(WEB_APP_NAME) ? generatedWebAppName : toLower(WEB_APP_NAME)
 var appServicePlanName = empty(APP_SERVICE_PLAN_NAME) ? '${webAppName}-plan' : APP_SERVICE_PLAN_NAME
+var outboundVnetName = take('${webAppName}-outbound-vnet', 64)
+var outboundIntegrationSubnetName = 'appsvc-integration'
+var outboundNatGatewayName = take('${webAppName}-nat', 80)
+var outboundPublicIpName = take('${webAppName}-egress-ip', 80)
+var enableManagedOutboundEgress = contains([
+  '1'
+  'true'
+  'yes'
+  'on'
+], toLower(trim(ENABLE_MANAGED_OUTBOUND_EGRESS)))
+var enforceStaticIpCheck = contains([
+  '1'
+  'true'
+  'yes'
+  'on'
+], toLower(trim(FYERS_ENFORCE_STATIC_IP_CHECK)))
+var paperTradeMode = contains([
+  '1'
+  'true'
+  'yes'
+  'on'
+], toLower(trim(FYERS_PAPER_TRADE_MODE)))
 var effectiveFrontendUrl = empty(FRONTEND_URL) ? 'https://${webAppName}.azurewebsites.net' : FRONTEND_URL
 var effectiveRedirectUri = empty(FYERS_REDIRECT_URI) ? '${effectiveFrontendUrl}/api/auth/callback' : FYERS_REDIRECT_URI
+var effectiveOrderStaticIp = enableManagedOutboundEgress ? outboundPublicIp!.properties.ipAddress : FYERS_ORDER_STATIC_IP
 var commonTags = union(TAGS, {
   app: 'tradebuddybot'
   'azd-env-name': environmentName
@@ -105,6 +137,10 @@ var appSettings = [
   {
     name: 'SCM_DO_BUILD_DURING_DEPLOYMENT'
     value: 'true'
+  }
+  {
+    name: 'NPM_CONFIG_PRODUCTION'
+    value: 'false'
   }
   {
     name: 'WEBSITE_HEALTHCHECK_MAXPINGFAILURES'
@@ -140,11 +176,11 @@ var appSettings = [
   }
   {
     name: 'FYERS_ORDER_STATIC_IP'
-    value: FYERS_ORDER_STATIC_IP
+    value: effectiveOrderStaticIp
   }
   {
     name: 'FYERS_ENFORCE_STATIC_IP_CHECK'
-    value: FYERS_ENFORCE_STATIC_IP_CHECK ? 'true' : 'false'
+    value: enforceStaticIpCheck ? 'true' : 'false'
   }
   {
     name: 'PUBLIC_IP_CHECK_URL'
@@ -152,13 +188,18 @@ var appSettings = [
   }
   {
     name: 'FYERS_PAPER_TRADE_MODE'
-    value: FYERS_PAPER_TRADE_MODE ? 'true' : 'false'
+    value: paperTradeMode ? 'true' : 'false'
   }
   {
     name: 'FRONTEND_URL'
     value: effectiveFrontendUrl
   }
 ]
+
+var webAppNetworkProperties = enableManagedOutboundEgress ? {
+  virtualNetworkSubnetId: outboundIntegrationSubnet.id
+  vnetRouteAllEnabled: true
+} : {}
 
 // Linux App Service plan for the Node.js app.
 resource appServicePlan 'Microsoft.Web/serverfarms@2024-04-01' = {
@@ -177,6 +218,75 @@ resource appServicePlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   tags: commonTags
 }
 
+// Optional outbound networking stack used to give the App Service a stable public egress IP.
+resource outboundPublicIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = if (enableManagedOutboundEgress) {
+  name: outboundPublicIpName
+  location: location
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    publicIPAllocationMethod: 'Static'
+    publicIPAddressVersion: 'IPv4'
+    idleTimeoutInMinutes: 4
+  }
+  tags: commonTags
+}
+
+resource outboundNatGateway 'Microsoft.Network/natGateways@2024-05-01' = if (enableManagedOutboundEgress) {
+  name: outboundNatGatewayName
+  location: location
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    idleTimeoutInMinutes: 4
+    publicIpAddresses: [
+      {
+        id: outboundPublicIp.id
+      }
+    ]
+  }
+  tags: commonTags
+}
+
+resource outboundVnet 'Microsoft.Network/virtualNetworks@2024-05-01' = if (enableManagedOutboundEgress) {
+  name: outboundVnetName
+  location: location
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        OUTBOUND_VNET_ADDRESS_PREFIX
+      ]
+    }
+  }
+  tags: commonTags
+}
+
+resource outboundIntegrationSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' = if (enableManagedOutboundEgress) {
+  parent: outboundVnet
+  name: outboundIntegrationSubnetName
+  properties: {
+    addressPrefix: OUTBOUND_INTEGRATION_SUBNET_PREFIX
+    delegations: [
+      {
+        name: 'appservice'
+        properties: {
+          serviceName: 'Microsoft.Web/serverFarms'
+        }
+      }
+    ]
+    natGateway: {
+      id: outboundNatGateway.id
+    }
+    serviceEndpoints: [
+      {
+        service: 'Microsoft.Storage'
+      }
+    ]
+  }
+}
+
 // Single App Service site serving the Express backend, scanner routes, and built Vite frontend.
 resource webApp 'Microsoft.Web/sites@2024-04-01' = {
   name: webAppName
@@ -185,7 +295,7 @@ resource webApp 'Microsoft.Web/sites@2024-04-01' = {
   identity: {
     type: 'SystemAssigned'
   }
-  properties: {
+  properties: union({
     serverFarmId: appServicePlan.id
     httpsOnly: true
     clientAffinityEnabled: false
@@ -203,7 +313,7 @@ resource webApp 'Microsoft.Web/sites@2024-04-01' = {
       webSocketsEnabled: true
       appSettings: appSettings
     }
-  }
+  }, webAppNetworkProperties)
   tags: commonTags
 }
 
@@ -211,3 +321,4 @@ output AZURE_WEB_APP_NAME string = webApp.name
 output AZURE_WEB_APP_URL string = 'https://${webApp.properties.defaultHostName}'
 output SERVICE_WEB_ENDPOINT_URL string = 'https://${webApp.properties.defaultHostName}'
 output MANAGED_IDENTITY_PRINCIPAL_ID string = webApp.identity.principalId
+output MANAGED_OUTBOUND_STATIC_IP string = enableManagedOutboundEgress ? outboundPublicIp!.properties.ipAddress : ''

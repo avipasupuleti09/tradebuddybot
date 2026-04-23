@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION}"
+    },
+    "FYERS_CLIENT_ID": {
+      "value": "${FYERS_CLIENT_ID}"
+    },
+    "FYERS_SECRET_KEY": {
+      "value": "${FYERS_SECRET_KEY}"
+    },
+    "FYERS_USER_ID": {
+      "value": "${FYERS_USER_ID}"
+    },
+    "FYERS_TOTP_KEY": {
+      "value": "${FYERS_TOTP_KEY}"
+    },
+    "FYERS_PIN": {
+      "value": "${FYERS_PIN}"
+    },
+    "FYERS_TOKEN_FILE": {
+      "value": "${FYERS_TOKEN_FILE}"
+    },
+    "ENABLE_MANAGED_OUTBOUND_EGRESS": {
+      "value": "${ENABLE_MANAGED_OUTBOUND_EGRESS}"
+    },
+    "FYERS_ENFORCE_STATIC_IP_CHECK": {
+      "value": "${FYERS_ENFORCE_STATIC_IP_CHECK}"
+    },
+    "PUBLIC_IP_CHECK_URL": {
+      "value": "${PUBLIC_IP_CHECK_URL}"
+    },
+    "FYERS_PAPER_TRADE_MODE": {
+      "value": "${FYERS_PAPER_TRADE_MODE}"
+    }
+  }
+}
